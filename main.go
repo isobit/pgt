@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"text/template"
 	"strings"
-	"time"
 	"sync"
+	"text/template"
+	"time"
 
 	"github.com/Masterminds/sprig/v3"
 	"github.com/isobit/cli"
@@ -19,15 +19,18 @@ func main() {
 	cmd := cli.New("dbench", &Cmd{
 		J: 1,
 		N: 1,
+		R: 1,
 	})
 	cmd.Parse().RunFatal()
 }
 
 type Cmd struct {
-	Database string `cli:"required,short=d,env=DATABASE_URL"`
+	Database         string `cli:"required,short=d,env=DATABASE_URL"`
 	TemplateFilename string `cli:"short=t"`
-	J int
-	N int
+	J                int    `cli:"help=number of concurrent connections/goroutines"`
+	N                int    `cli:"help=number of transactions per connection"`
+	R                int    `cli:"help=number of rows per transaction"`
+	// Data map[string]string
 }
 
 func warmPool(ctx context.Context, pool *pgxpool.Pool) error {
@@ -56,7 +59,6 @@ func warmPool(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
-
 func (cmd *Cmd) Run() error {
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
@@ -84,11 +86,12 @@ func (cmd *Cmd) Run() error {
 	}
 
 	r := runner{
-		name: fmt.Sprintf("bench_%s", time.Now().Format("2006_01_02T15_04_05")),
-		txnTmpl: tmpl,
+		name:     fmt.Sprintf("bench_%s", time.Now().Format("2006_01_02T15_04_05")),
+		r:        cmd.R,
+		txnTmpl:  tmpl,
 		initTmpl: initTmpl,
-		pool: pool,
-		stats: &statTracker{},
+		pool:     pool,
+		stats:    &statTracker{},
 	}
 
 	if infoTmpl != nil {
@@ -101,13 +104,12 @@ func (cmd *Cmd) Run() error {
 		r.infoConn = infoConn
 	}
 
-
 	if err := r.executeInit(ctx); err != nil {
 		return err
 	}
 
 	go func() {
-		infoTicker := time.NewTicker(1*time.Second)
+		infoTicker := time.NewTicker(1 * time.Second)
 		for {
 			select {
 			case <-ctx.Done():
@@ -150,18 +152,20 @@ type initTmplData struct {
 
 type txnTmplData struct {
 	Name string
-	I int
-	J int
+	I    int
+	J    int
+	R    int
 }
 
 type runner struct {
 	name string
+	r    int
 
 	initTmpl *template.Template
-	txnTmpl *template.Template
+	txnTmpl  *template.Template
 	infoTmpl *template.Template
 
-	pool *pgxpool.Pool
+	pool     *pgxpool.Pool
 	infoConn *pgx.Conn
 
 	stats *statTracker
@@ -189,8 +193,9 @@ func (r *runner) executeInit(ctx context.Context) error {
 func (r *runner) executeTxn(ctx context.Context, j int, i int) error {
 	txnSql, err := execTemplate(r.txnTmpl, txnTmplData{
 		Name: r.name,
-		I: i,
-		J: j,
+		I:    i,
+		J:    j,
+		R:    r.r,
 	})
 	if err != nil {
 		return err
@@ -265,8 +270,8 @@ type statTracker struct {
 	sync.Mutex
 	cumulativeCount int
 	cumulativeTotal time.Duration
-	count int
-	total time.Duration
+	count           int
+	total           time.Duration
 }
 
 func (s *statTracker) record(t time.Duration) {
@@ -280,9 +285,9 @@ func (s *statTracker) record(t time.Duration) {
 
 type statInfo struct {
 	cumulativeCount int
-	count int
-	tps float64
-	avg time.Duration
+	count           int
+	tps             float64
+	avg             time.Duration
 }
 
 func (s *statTracker) flush() statInfo {
@@ -296,11 +301,11 @@ func (s *statTracker) flush() statInfo {
 	s.count = 0
 	s.total = 0
 
-	return statInfo {
+	return statInfo{
 		cumulativeCount: s.cumulativeCount,
-		count: count,
-		tps: tps,
-		avg: avg,
+		count:           count,
+		tps:             tps,
+		avg:             avg,
 	}
 }
 
@@ -332,5 +337,5 @@ func execTemplate(tmpl *template.Template, data any) (string, error) {
 // }
 
 func logf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, format + "\n", args...)
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
 }
