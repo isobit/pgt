@@ -12,6 +12,8 @@ import (
 	"github.com/Masterminds/sprig/v3"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/isobit/pgt/util"
 )
 
 type BenchCommand struct {
@@ -44,7 +46,7 @@ func (cmd *BenchCommand) Run(ctx context.Context) error {
 		return err
 	}
 	poolCfg.MaxConns = int32(cmd.Conns)
-	logf("initializing connection pool")
+	util.Logf(0, "initializing connection pool")
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return err
@@ -89,7 +91,7 @@ func (cmd *BenchCommand) Run(ctx context.Context) error {
 		}
 	}()
 
-	logf("starting benchmark")
+	util.Logf(0, "starting benchmark")
 	start := time.Now()
 	r.stats.start = start
 	wg := sync.WaitGroup{}
@@ -148,7 +150,7 @@ func (r *runner) executeInit(ctx context.Context) error {
 		return nil
 	}
 
-	logf("running init")
+	util.Logf(1, "running init")
 	initSql, err := execTemplate(r.initTmpl, initTmplData{
 		Name: r.name,
 	})
@@ -156,7 +158,7 @@ func (r *runner) executeInit(ctx context.Context) error {
 		return err
 	}
 	if _, err := r.pool.Exec(ctx, initSql); err != nil {
-		logf(initSql)
+		util.Logf(3, initSql)
 		return err
 	}
 	return nil
@@ -181,7 +183,7 @@ func (r *runner) executeTxn(ctx context.Context, j int, i int) error {
 
 	start := time.Now()
 	if _, err := conn.Exec(ctx, txnSql); err != nil {
-		logf(txnSql)
+		util.Logf(3, txnSql)
 		return err
 	}
 	elapsed := time.Since(start)
@@ -215,7 +217,7 @@ func (r *runner) logInfo(ctx context.Context) {
 	}
 	rows, err := r.infoConn.Query(ctx, infoSql)
 	if err != nil {
-		logf(infoSql)
+		util.Logf(3, infoSql)
 		panic(err)
 	}
 	defer rows.Close()
@@ -330,16 +332,4 @@ func warmPool(ctx context.Context, pool *pgxpool.Pool) error {
 		conn.Release()
 	}
 	return nil
-}
-
-// func execTemplate(tmpl *template.Template, name string, data any) (string, error) {
-// 	b := strings.Builder{}
-// 	if err := tmpl.ExecuteTemplate(&b, name, data); err != nil {
-// 		return "", err
-// 	}
-// 	return b.String(), nil
-// }
-
-func logf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
 }
