@@ -22,8 +22,9 @@ import (
 type MigrateCommand struct {
 	Database    string `cli:"required,short=d,env=PGT_DATABASE_URL"`
 	Source      string `cli:"required,short=s,env=PGT_MIGRATION_SOURCE"`
-	Test        bool   `cli:"short=t,env=PGT_TEST"`
-	DumpOutput  string `cli:"short=o,env=PGT_DUMP_OUTPUT"`
+	Version     *uint
+	Test        bool   `cli:"env=PGT_TEST"`
+	Dump        string `cli:"env=PGT_DUMP"`
 	DumpCommand string `cli:"env=PGT_DUMP_COMMAND"`
 }
 
@@ -67,8 +68,8 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 	}
 
 	var dumper *Dumper
-	if cmd.DumpOutput != "" {
-		d, err := NewDumper(pgCfg, cmd.DumpCommand, cmd.DumpOutput)
+	if cmd.Dump != "" {
+		d, err := NewDumper(pgCfg, cmd.DumpCommand, cmd.Dump)
 		if err != nil {
 			return err
 		}
@@ -97,9 +98,16 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 	defer m.Close()
 
 	logf("running migrations")
-	if err := m.Up(); err != nil {
-		retainTestDatabase = true
-		return fmt.Errorf("error applying migration: %w", err)
+	if cmd.Version != nil {
+		if err := m.Migrate(*cmd.Version); err != nil {
+			retainTestDatabase = true
+			return fmt.Errorf("error applying migration: %w", err)
+		}
+	} else {
+		if err := m.Up(); err != nil {
+			retainTestDatabase = true
+			return fmt.Errorf("error applying migration: %w", err)
+		}
 	}
 
 	if dumper != nil {
