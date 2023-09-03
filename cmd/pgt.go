@@ -10,6 +10,7 @@ func main() {
 		"pgt", nil,
 		cli.New("migrate", pgt.NewMigrateCommand()),
 		cli.New("bench", pgt.NewBenchCommand()),
+		cli.New("blockwatcher", &pgt.BlockWatcherCommand{}),
 	)
 	cmd.Parse().RunFatalWithSigCancel()
 }

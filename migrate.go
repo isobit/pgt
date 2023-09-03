@@ -111,6 +111,151 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 	return nil
 }
 
+type BlockWatcherCommand struct {
+	Database               string        `cli:"short=d"`
+	MaxBlockedWaitDuration time.Duration `cli:"short=m"`
+
+	// Pid                    int
+	Query string
+}
+
+func (cmd *BlockWatcherCommand) Run(ctx context.Context) error {
+	pgCfg, err := pgx.ParseConfig(cmd.Database)
+	if err != nil {
+		return err
+	}
+
+	conn, err := pgx.ConnectConfig(ctx, pgCfg)
+	if err != nil {
+		return err
+	}
+	defer conn.Close(ctx)
+
+	var pid int
+	row := conn.QueryRow(ctx, `select pg_backend_pid()`)
+	if err := row.Scan(&pid); err != nil {
+		return err
+	}
+
+	bw := BlockWatcher{
+		ConnConfig:             pgCfg,
+		Pid:                    pid,
+		MaxBlockedWaitDuration: cmd.MaxBlockedWaitDuration,
+	}
+
+	qCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	go func() {
+		if err := bw.Watch(qCtx); err != nil {
+			logf("error in block watcher: %s", err)
+			cancel()
+		}
+	}()
+
+	if _, err := conn.Exec(qCtx, cmd.Query); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+type BlockWatcher struct {
+	ConnConfig             *pgx.ConnConfig
+	Pid                    int
+	MaxBlockedWaitDuration time.Duration
+
+	conn *pgx.Conn
+}
+
+func (w *BlockWatcher) Watch(ctx context.Context) error {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := w.check(ctx); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (w *BlockWatcher) connect(ctx context.Context) (*pgx.Conn, error) {
+	if w.conn != nil && !w.conn.IsClosed() {
+		return w.conn, nil
+	}
+	logf("connecting")
+	conn, err := pgx.ConnectConfig(ctx, w.ConnConfig)
+	if err != nil {
+		return nil, err
+	}
+	w.conn = conn
+	return conn, nil
+}
+
+func (w *BlockWatcher) check(ctx context.Context) error {
+	conn, err := w.connect(ctx)
+	if err != nil {
+		return err
+	}
+
+	logf("checking")
+	rows, err := conn.Query(
+		ctx,
+		`
+		select pid
+		from pg_locks
+		where
+			$1 = any(pg_blocking_pids(pid))
+			and waitstart < now() - $2::interval
+		group by (pid)
+		`,
+		w.Pid,
+		w.MaxBlockedWaitDuration,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	blockedPids, err := pgx.CollectRows(rows, pgx.RowTo[int])
+	if err != nil {
+		return err
+	}
+	if blockedPids == nil || len(blockedPids) == 0 {
+		return nil
+	}
+
+	pidStrs := make([]string, len(blockedPids))
+	for i, pid := range blockedPids {
+		pidStrs[i] = fmt.Sprintf("%d", pid)
+	}
+
+	logf(
+		"cancelling backend %d; other processes were blocked waiting on it for more than %s: %s",
+		w.Pid, w.MaxBlockedWaitDuration, strings.Join(pidStrs, ", "),
+	)
+	if err := w.cancelBackend(ctx); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (w *BlockWatcher) cancelBackend(ctx context.Context) error {
+	conn, err := w.connect(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := conn.Exec(ctx, `select pg_cancel_backend($1)`, w.Pid); err != nil {
+		return err
+	}
+	return nil
+}
+
 type Dumper struct {
 	CommandPath string
 	CommandArgs []string
