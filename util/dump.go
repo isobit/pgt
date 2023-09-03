@@ -17,10 +17,9 @@ type Dumper struct {
 	commandPath string
 	commandArgs []string
 	commandEnv  []string
-	outputPath  string
 }
 
-func NewDumper(pgCfg *pgx.ConnConfig, command string, outputPath string) (*Dumper, error) {
+func NewDumper(pgCfg *pgx.ConnConfig, command string) (*Dumper, error) {
 	cmdTemplate, err := template.New("").Parse(command)
 	if err != nil {
 		return nil, err
@@ -63,19 +62,18 @@ func NewDumper(pgCfg *pgx.ConnConfig, command string, outputPath string) (*Dumpe
 		commandPath: cmdPath,
 		commandArgs: cmdArgs[1:],
 		commandEnv:  cmdEnv,
-		outputPath:  outputPath,
 	}
 	return dumper, nil
 }
 
-func (d *Dumper) Dump(ctx context.Context) error {
-	Logf(1, "dumping to %s using %s %s", d.outputPath, d.commandPath, strings.Join(d.commandArgs, " "))
+func (d *Dumper) Dump(ctx context.Context, outputPath string) error {
 	cmd := exec.CommandContext(ctx, d.commandPath, d.commandArgs...)
 	cmd.Env = d.commandEnv
 
-	outfile, err := os.Create(d.outputPath)
+	Logf(1, "creating dump output file: %s", outputPath)
+	outfile, err := os.Create(outputPath)
 	if err != nil {
-		return fmt.Errorf("error creating dump output %s: %w", d.outputPath, err)
+		return fmt.Errorf("error creating dump output %s: %w", outputPath, err)
 	}
 	defer outfile.Close()
 	cmd.Stdout = outfile
@@ -83,12 +81,12 @@ func (d *Dumper) Dump(ctx context.Context) error {
 	stderr := strings.Builder{}
 	cmd.Stderr = &stderr
 
+	Logf(1, "starting dump command: %s %s", d.commandPath, strings.Join(d.commandArgs, " "))
 	if err := cmd.Start(); err != nil {
-		Logf(2, "dump stderr: %s", stderr.String())
-		return fmt.Errorf("dump failed: %w", err)
+		return fmt.Errorf("error starting dump command: %w", err)
 	}
 	if err := cmd.Wait(); err != nil {
-		Logf(2, "dump stderr: %s", stderr.String())
+		Logf(-1, "dump stderr: %s", stderr.String())
 		return fmt.Errorf("dump failed: %w", err)
 	}
 	return nil

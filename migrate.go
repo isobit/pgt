@@ -21,6 +21,7 @@ type MigrateCommand struct {
 	Version     *uint
 	Test        bool   `cli:"env=PGT_TEST"`
 	Dump        string `cli:"env=PGT_DUMP"`
+	DumpDown    string `cli:"env=PGT_DUMP_DOWN"`
 	DumpCommand string `cli:"env=PGT_DUMP_COMMAND"`
 }
 
@@ -63,8 +64,8 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 	}
 
 	var dumper *util.Dumper
-	if cmd.Dump != "" {
-		d, err := util.NewDumper(poolCfg.ConnConfig, cmd.DumpCommand, cmd.Dump)
+	if cmd.Dump != "" || cmd.DumpDown != "" {
+		d, err := util.NewDumper(poolCfg.ConnConfig, cmd.DumpCommand)
 		if err != nil {
 			return err
 		}
@@ -92,22 +93,39 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 	}
 	defer m.Close()
 
-	util.Logf(0, "running migrations")
 	if cmd.Version != nil {
-		if err := m.Migrate(*cmd.Version); err != nil {
+		version := *cmd.Version
+		util.Logf(0, "migrating up to version %d", version)
+		if err := m.Migrate(version); err != nil {
 			retainTestDatabase = true
 			return fmt.Errorf("error applying migration: %w", err)
 		}
 	} else {
+		util.Logf(0, "migrating up")
 		if err := m.Up(); err != nil {
 			retainTestDatabase = true
-			return fmt.Errorf("error applying migration: %w", err)
+			return fmt.Errorf("error migrating up: %w", err)
 		}
 	}
 
-	if dumper != nil {
-		if err := dumper.Dump(ctx); err != nil {
+	if dumper != nil && cmd.Dump != "" {
+		util.Logf(0, "dumping to %s", cmd.Dump)
+		if err := dumper.Dump(ctx, cmd.Dump); err != nil {
 			return err
+		}
+	}
+
+	if cmd.Test {
+		util.Logf(0, "migrating down")
+		if err := m.Down(); err != nil {
+			retainTestDatabase = true
+			return fmt.Errorf("error migrating down: %w", err)
+		}
+		if dumper != nil && cmd.DumpDown != "" {
+			util.Logf(0, "dumping post-down to %s", cmd.DumpDown)
+			if err := dumper.Dump(ctx, cmd.DumpDown); err != nil {
+				return err
+			}
 		}
 	}
 
