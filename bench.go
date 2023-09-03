@@ -1,4 +1,4 @@
-package main
+package pgt
 
 import (
 	"context"
@@ -10,59 +10,28 @@ import (
 	"time"
 
 	"github.com/Masterminds/sprig/v3"
-	"github.com/isobit/cli"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func main() {
-	cmd := cli.New("dbench", &Cmd{
-		J: 1,
-		N: 1,
-		R: 1,
-	})
-	cmd.Parse().RunFatal()
-}
-
-type Cmd struct {
+type BenchCommand struct {
 	Database         string `cli:"required,short=d,env=DATABASE_URL"`
 	TemplateFilename string `cli:"short=t"`
-	J                int    `cli:"help=number of concurrent connections/goroutines"`
-	N                int    `cli:"help=number of transactions per connection"`
-	R                int    `cli:"help=number of rows per transaction"`
+	Conns            int    `cli:"short=j,help=number of concurrent connections/goroutines"`
+	TxnPerConn       int    `cli:"short=n,help=number of transactions per connection"`
+	RowsPerTxn       int    `cli:"short=r,help=number of rows per transaction"`
 	// Data map[string]string
 }
 
-func warmPool(ctx context.Context, pool *pgxpool.Pool) error {
-	maxConns := pool.Config().MaxConns
-	conns := make([]*pgxpool.Conn, maxConns)
-	wg := sync.WaitGroup{}
-	for i := int32(0); i < maxConns; i++ {
-		i := i
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			conn, err := pool.Acquire(ctx)
-			if err != nil {
-				panic(err)
-			}
-			conns[i] = conn
-			if err := conn.Ping(ctx); err != nil {
-				panic(err)
-			}
-		}()
+func NewBenchCommand() *BenchCommand {
+	return &BenchCommand{
+		Conns:      1,
+		TxnPerConn: 1,
+		RowsPerTxn: 1,
 	}
-	wg.Wait()
-	for _, conn := range conns {
-		conn.Release()
-	}
-	return nil
 }
 
-func (cmd *Cmd) Run() error {
-	ctx, cancel := context.WithCancel(context.TODO())
-	defer cancel()
-
+func (cmd *BenchCommand) Run(ctx context.Context) error {
 	tmpl, err := readTemplate(cmd.TemplateFilename)
 	if err != nil {
 		return err
@@ -74,7 +43,7 @@ func (cmd *Cmd) Run() error {
 	if err != nil {
 		return err
 	}
-	poolCfg.MaxConns = int32(cmd.J)
+	poolCfg.MaxConns = int32(cmd.Conns)
 	logf("initializing connection pool")
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
@@ -87,7 +56,7 @@ func (cmd *Cmd) Run() error {
 
 	r := runner{
 		name:     fmt.Sprintf("bench_%s", time.Now().Format("2006_01_02T15_04_05")),
-		r:        cmd.R,
+		r:        cmd.RowsPerTxn,
 		txnTmpl:  tmpl,
 		initTmpl: initTmpl,
 		pool:     pool,
@@ -121,13 +90,15 @@ func (cmd *Cmd) Run() error {
 	}()
 
 	logf("starting benchmark")
+	start := time.Now()
+	r.stats.start = start
 	wg := sync.WaitGroup{}
-	for j := 0; j < cmd.J; j++ {
+	for j := 0; j < cmd.Conns; j++ {
 		wg.Add(1)
 		j := j
 		go func() {
 			defer wg.Done()
-			for i := 0; i < cmd.N; i++ {
+			for i := 0; i < cmd.TxnPerConn; i++ {
 				if err := r.executeTxn(ctx, j, i); err != nil {
 					panic(err)
 				}
@@ -139,9 +110,10 @@ func (cmd *Cmd) Run() error {
 	r.logInfo(ctx)
 
 	r.stats.Lock()
-	tps := float64(r.stats.cumulativeCount) / r.stats.cumulativeTotal.Seconds()
+	tps := float64(r.stats.cumulativeCount) / time.Since(start).Seconds()
+	ntps := float64(r.stats.cumulativeCount) / r.stats.cumulativeTotal.Seconds()
 	avg := time.Duration(float64(r.stats.cumulativeTotal) / float64(r.stats.cumulativeCount))
-	fmt.Printf("summary tps %.2f avg %s\n", tps, avg)
+	fmt.Printf("summary tps %.2f ntps %.2f avg %s\n", tps, ntps, avg)
 
 	return nil
 }
@@ -229,7 +201,7 @@ func (r *runner) logInfo(ctx context.Context) {
 
 	defer fmt.Printf("\n")
 	// fmt.Printf("t=%d n=%d c=%d tps=%0.2f avg=%s", time.Now().Unix(), statInfo.cumulativeCount, statInfo.count, statInfo.tps, statInfo.avg)
-	fmt.Printf("t %d n %d c %d tps %0.2f avg %s", time.Now().Unix(), statInfo.cumulativeCount, statInfo.count, statInfo.tps, statInfo.avg)
+	fmt.Printf("t %d n %d c %d tps %.2f ntps %.2f avg %s", time.Now().Unix(), statInfo.cumulativeCount, statInfo.count, statInfo.tps, statInfo.ntps, statInfo.avg)
 
 	if r.infoTmpl == nil || r.infoConn == nil {
 		return
@@ -268,6 +240,7 @@ func (r *runner) logInfo(ctx context.Context) {
 
 type statTracker struct {
 	sync.Mutex
+	start           time.Time
 	cumulativeCount int
 	cumulativeTotal time.Duration
 	count           int
@@ -287,6 +260,7 @@ type statInfo struct {
 	cumulativeCount int
 	count           int
 	tps             float64
+	ntps            float64
 	avg             time.Duration
 }
 
@@ -294,10 +268,13 @@ func (s *statTracker) flush() statInfo {
 	s.Lock()
 	defer s.Unlock()
 
+	d := time.Since(s.start)
 	count := s.count
-	tps := float64(count) / s.total.Seconds()
+	tps := float64(count) / d.Seconds()
+	ntps := float64(count) / s.total.Seconds()
 	avg := time.Duration(float64(s.total) / float64(count))
 
+	s.start = time.Now()
 	s.count = 0
 	s.total = 0
 
@@ -305,6 +282,7 @@ func (s *statTracker) flush() statInfo {
 		cumulativeCount: s.cumulativeCount,
 		count:           count,
 		tps:             tps,
+		ntps:            ntps,
 		avg:             avg,
 	}
 }
@@ -326,6 +304,32 @@ func execTemplate(tmpl *template.Template, data any) (string, error) {
 		return "", err
 	}
 	return b.String(), nil
+}
+
+func warmPool(ctx context.Context, pool *pgxpool.Pool) error {
+	maxConns := pool.Config().MaxConns
+	conns := make([]*pgxpool.Conn, maxConns)
+	wg := sync.WaitGroup{}
+	for i := int32(0); i < maxConns; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			conn, err := pool.Acquire(ctx)
+			if err != nil {
+				panic(err)
+			}
+			conns[i] = conn
+			if err := conn.Ping(ctx); err != nil {
+				panic(err)
+			}
+		}()
+	}
+	wg.Wait()
+	for _, conn := range conns {
+		conn.Release()
+	}
+	return nil
 }
 
 // func execTemplate(tmpl *template.Template, name string, data any) (string, error) {

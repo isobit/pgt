@@ -3,7 +3,7 @@
 all: build fmt lint test
 
 build:
-	go build -o tmpl ./main.go
+	go build ./cmd/pgt.go
 
 fmt:
 	go fmt ./...
