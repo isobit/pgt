@@ -10,32 +10,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type BlockWatcherCommand struct {
-	Database               string        `cli:"short=d"`
-	MaxBlockedWaitDuration time.Duration `cli:"short=m"`
-
-	Query string
-}
-
-func (cmd *BlockWatcherCommand) Run(ctx context.Context) error {
-	pool, err := pgxpool.New(ctx, cmd.Database)
-	if err != nil {
-		return err
-	}
-
-	conn, err := AcquireWithBlockWatcher(ctx, pool, cmd.MaxBlockedWaitDuration)
-	if err != nil {
-		return err
-	}
-	defer conn.Release()
-
-	if _, err := conn.Exec(ctx, cmd.Query); err != nil {
-		return err
-	}
-
-	return nil
-}
-
 type BlockWatchedPoolConn struct {
 	*pgxpool.Conn
 	watcherCancel context.CancelFunc
@@ -48,23 +22,32 @@ func (c *BlockWatchedPoolConn) Release() {
 	c.Conn.Release()
 }
 
-func AcquireWithBlockWatcher(ctx context.Context, pool *pgxpool.Pool, maxBlockDuration time.Duration) (*BlockWatchedPoolConn, error) {
+func AcquireWithBlockWatcher(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	maxBlockDuration time.Duration,
+	maxBlockProcesses int,
+) (
+	*BlockWatchedPoolConn,
+	error,
+) {
+
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	var pid int
-	row := conn.QueryRow(ctx, `select pg_backend_pid()`)
-	if err := row.Scan(&pid); err != nil {
+	if err := conn.QueryRow(ctx, `select pg_backend_pid()`).Scan(&pid); err != nil {
 		conn.Release()
 		return nil, err
 	}
 
 	watcher := BlockWatcher{
-		pool:             pool,
-		pid:              pid,
-		maxBlockDuration: maxBlockDuration,
+		pool:              pool,
+		pid:               pid,
+		maxBlockDuration:  maxBlockDuration,
+		maxBlockProcesses: maxBlockProcesses,
 	}
 
 	watcherDone := make(chan bool)
@@ -89,9 +72,10 @@ func AcquireWithBlockWatcher(ctx context.Context, pool *pgxpool.Pool, maxBlockDu
 }
 
 type BlockWatcher struct {
-	pool             *pgxpool.Pool
-	pid              int
-	maxBlockDuration time.Duration
+	pool              *pgxpool.Pool
+	pid               int
+	maxBlockDuration  time.Duration
+	maxBlockProcesses int
 }
 
 func (w *BlockWatcher) Watch(ctx context.Context) error {
@@ -124,7 +108,7 @@ func (w *BlockWatcher) check(ctx context.Context) error {
 		where
 			not granted
 			and $1 = any(pg_blocking_pids(pid))
-			and waitstart < now() - $2::interval
+			and waitstart <= now() - $2::interval
 		group by (pid)
 		`,
 		w.pid,
@@ -139,19 +123,26 @@ func (w *BlockWatcher) check(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if blockedPids == nil || len(blockedPids) == 0 {
+	if blockedPids == nil || len(blockedPids) <= w.maxBlockProcesses {
 		return nil
 	}
 
-	pidStrs := make([]string, len(blockedPids))
-	for i, pid := range blockedPids {
-		pidStrs[i] = fmt.Sprintf("%d", pid)
+	var extra string
+	if LogLevel >= 2 {
+		pidStrs := make([]string, len(blockedPids))
+		for i, pid := range blockedPids {
+			pidStrs[i] = fmt.Sprintf("%d", pid)
+		}
+		extra = fmt.Sprintf(
+			"; cancelling PID: %d; blocked PIDs: %s",
+			w.pid, strings.Join(pidStrs, ", "),
+		)
 	}
-
 	Logf(
-		-1, "cancelling backend %d; other processes were blocked waiting on it for more than %s: %s",
-		w.pid, w.maxBlockDuration, strings.Join(pidStrs, ", "),
+		-1, "cancelling backend; %d other processes were blocked waiting on it for more than %s%s",
+		len(blockedPids), w.maxBlockDuration, extra,
 	)
+
 	if err := w.cancelBackend(ctx); err != nil {
 		return err
 	}

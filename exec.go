@@ -10,15 +10,17 @@ import (
 )
 
 type ExecCommand struct {
-	Database string `cli:"short=d"`
-	Query    string `cli:"short=q"`
+	Database string `cli:"required,short=d,env=PGT_DATABASE,help=database connection string"`
+	Query    string `cli:"required,short=q"`
 
-	MaxBlockDuration time.Duration
+	MaxBlockDuration  time.Duration `cli:"env=PGT_MAX_BLOCK_DURATION"`
+	MaxBlockProcesses int           `cli:"env=PGT_MAX_BLOCK_PROCESSES"`
 }
 
 func NewExecCommand() *ExecCommand {
 	return &ExecCommand{
-		MaxBlockDuration: 10 * time.Second,
+		MaxBlockDuration:  10 * time.Second,
+		MaxBlockProcesses: 0,
 	}
 }
 
@@ -29,7 +31,7 @@ func (cmd *ExecCommand) Run(ctx context.Context) error {
 	}
 	defer pool.Close()
 
-	conn, err := util.AcquireWithBlockWatcher(ctx, pool, cmd.MaxBlockDuration)
+	conn, err := util.AcquireWithBlockWatcher(ctx, pool, cmd.MaxBlockDuration, cmd.MaxBlockProcesses)
 	if err != nil {
 		return err
 	}

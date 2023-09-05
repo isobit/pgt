@@ -79,12 +79,12 @@ type MigratorOptions struct {
 }
 
 type Migrator struct {
-	conn         *pgx.Conn
-	versionTable string
-	options      *MigratorOptions
-	Migrations   []*Migration
-	OnStart      func(int32, string, string, string) // OnStart is called when a migration is run with the sequence, name, direction, and SQL
-	Data         map[string]interface{}              // Data available to use in migrations
+	conn            *pgx.Conn
+	versionTable    string
+	options         *MigratorOptions
+	Migrations      []*Migration
+	BeforeMigration func(int32, string, string, string) error // OnStart is called when a migration is run with the sequence, name, direction, and SQL
+	Data            map[string]interface{}                    // Data available to use in migrations
 }
 
 // NewMigrator initializes a new Migrator. It is highly recommended that versionTable be schema qualified.
@@ -350,6 +350,13 @@ func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int32) (err erro
 			sql = disableTxPattern.ReplaceAllLiteralString(sql, "")
 		}
 
+		// BeforeMigration callback
+		if m.BeforeMigration != nil {
+			if err := m.BeforeMigration(current.Sequence, current.Name, directionName, sql); err != nil {
+				return err
+			}
+		}
+
 		if useTx {
 			sqlStatements = []string{sql}
 		} else {
@@ -383,11 +390,6 @@ func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int32) (err erro
 			}
 		}
 
-		// Fire on start callback
-		if m.OnStart != nil {
-			m.OnStart(current.Sequence, current.Name, directionName, sql)
-		}
-
 		// Execute the migration
 		for _, statement := range sqlStatements {
 			_, err = m.conn.Exec(ctx, statement)
@@ -403,6 +405,47 @@ func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int32) (err erro
 		m.conn.Exec(ctx, "reset all")
 
 		if useTx {
+			// WIP lock reporting
+			if false {
+				var pid int
+				if err := m.conn.QueryRow(ctx, `select pg_backend_pid()`).Scan(&pid); err != nil {
+					return err
+				}
+
+				rows, err := m.conn.Query(ctx, `
+				select coalesce(mode, ''), coalesce(nspname || '.' || relname, '')
+				from pg_catalog.pg_locks
+				join pg_catalog.pg_class on relation = pg_class.oid
+				join pg_catalog.pg_namespace on relnamespace = pg_namespace.oid
+				where pid = $1
+					and locktype = 'relation'
+					and pg_table_is_visible(pg_class.oid)
+					and nspname != 'pg_catalog';
+				`, pid)
+				if err != nil {
+					return err
+				}
+
+				type lock struct {
+					Mode     string
+					Relation string
+				}
+				locks, err := pgx.CollectRows(rows, pgx.RowToStructByPos[lock])
+				if err != nil {
+					return err
+				}
+				util.Logf(3, "%s locks: %v", current.Name, locks)
+				for _, lock := range locks {
+					switch lock.Mode {
+					case "AccessExclusiveLock":
+					case "ExclusiveLock":
+					case "ShareRowExclusiveLock":
+					case "ShareLock":
+						util.Logf(-1, "%s takes aggressive lock: %s on %s", current.Name, lock.Mode, lock.Relation)
+					}
+				}
+			}
+
 			if direction == 1 {
 				_, err = m.conn.Exec(ctx, fmt.Sprintf(`
 				insert into %s(version, started_at, finished_at)

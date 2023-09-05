@@ -9,15 +9,15 @@ import (
 )
 
 func main() {
-	if stderrStat, err := os.Stderr.Stat(); err == nil {
-		if stderrStat.Mode()&os.ModeCharDevice != 0 {
-			pgt_util.LogColor = true
-		}
+	interactive := false
+	if stderrStat, err := os.Stderr.Stat(); err == nil && stderrStat.Mode()&os.ModeCharDevice != 0 {
+		interactive = true
+		pgt_util.LogColor = true
 	}
 
 	cmd := cli.New(
 		"pgt", &CLI{},
-		cli.New("migrate", pgt.NewMigrateCommand()),
+		cli.New("migrate", pgt.NewMigrateCommand(interactive)),
 		cli.New("version", pgt.NewMigrateVersionCommand()),
 		cli.New("exec", pgt.NewExecCommand()),
 		cli.New("bench", pgt.NewBenchCommand()),
