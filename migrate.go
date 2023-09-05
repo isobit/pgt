@@ -115,7 +115,7 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 		return err
 	}
 	m.BeforeMigration = func(sequence int32, name string, direction string, sql string) error {
-		if !cmd.Yes {
+		if !(cmd.Yes || cmd.Test) {
 			if cmd.interactive {
 				reprompt := true
 				for reprompt {
