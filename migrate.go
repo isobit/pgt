@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/isobit/pgt/migrate"
@@ -13,27 +14,25 @@ import (
 )
 
 type MigrateCommand struct {
-	Database string `cli:"required,short=d,env=PGT_DATABASE_URL"`
-	Source   string `cli:"required,short=s,env=PGT_MIGRATION_SOURCE"`
-	Version  int32
+	Database string `cli:"required,short=d,env=PGT_DATABASE,help=database connection string"`
+	Source   string `cli:"required,short=s,env=PGT_MIGRATION_SOURCE,help=path to migrations directory"`
+	Target   *int32 `cli:"short=t,env=PGT_MIGRATION_TARGET,help=version to target,default=latest"`
+	// Data map[string]string
 
-	Test bool `cli:"env=PGT_TEST"`
+	Test bool `cli:"env=PGT_TEST,help=enable test mode"`
 
-	Dump        string `cli:"env=PGT_DUMP"`
-	DumpDown    string `cli:"env=PGT_DUMP_DOWN"`
-	DumpCommand string `cli:"env=PGT_DUMP_COMMAND"`
+	Dump        string `cli:"env=PGT_DUMP,help=file path to dump schema to"`
+	DumpCommand string `cli:"env=PGT_DUMP_COMMAND,help=command used to dump schema"`
 
-	VersionTable     string `cli:"env=PGT_VERSION_TABLE"`
-	MaxBlockDuration time.Duration
+	VersionTable     string        `cli:"env=PGT_VERSION_TABLE"`
+	MaxBlockDuration time.Duration `cli:"env=PGT_MAX_BLOCK_DURATION"`
 }
 
 func NewMigrateCommand() *MigrateCommand {
 	return &MigrateCommand{
-		Version: -1,
-
 		DumpCommand: "pg_dump --schema-only '{{.Url}}'",
 
-		VersionTable:     "schema_version",
+		VersionTable:     "pgt.schema_version",
 		MaxBlockDuration: 10 * time.Second,
 	}
 }
@@ -41,6 +40,10 @@ func NewMigrateCommand() *MigrateCommand {
 func (cmd *MigrateCommand) Run(ctx context.Context) error {
 	poolCfg, err := pgxpool.ParseConfig(cmd.Database)
 	if err != nil {
+		return err
+	}
+
+	if _, err := os.Stat(cmd.Source); err != nil {
 		return err
 	}
 
@@ -54,7 +57,7 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 
 		testDatabase = fmt.Sprintf("pgt_migrate_test_%d", time.Now().UTC().Unix())
 		util.Logf(0, "creating test database: %s", testDatabase)
-		if _, err := origPool.Exec(ctx, fmt.Sprintf("create database \"%s\";", testDatabase)); err != nil {
+		if _, err := origPool.Exec(ctx, fmt.Sprintf(`create database "%s";`, testDatabase)); err != nil {
 			return err
 		}
 		defer func() {
@@ -63,7 +66,7 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 				return
 			}
 			util.Logf(0, "dropping test database: %s", testDatabase)
-			if _, err := origPool.Exec(ctx, fmt.Sprintf("drop database \"%s\";", testDatabase)); err != nil {
+			if _, err := origPool.Exec(ctx, fmt.Sprintf(`drop database "%s";`, testDatabase)); err != nil {
 				util.Logf(-2, "error dropping test database: %s", err)
 			}
 		}()
@@ -71,7 +74,7 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 	}
 
 	var dumper *util.Dumper
-	if cmd.Dump != "" || cmd.DumpDown != "" {
+	if cmd.Dump != "" {
 		d, err := util.NewDumper(poolCfg.ConnConfig, cmd.DumpCommand)
 		if err != nil {
 			return err
@@ -105,16 +108,22 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 		util.Logf(0, "starting %s migration for version %d", direction, sequence)
 	}
 
-	if cmd.Version < 0 {
-		util.Logf(0, "migrating to latest version")
-		if err := m.Migrate(mctx); err != nil {
-			return err
-		}
+	var merr error
+	if cmd.Target != nil {
+		version := *cmd.Target
+		util.Logf(0, "migrating to version %d", version)
+		merr = m.MigrateTo(mctx, version)
 	} else {
-		util.Logf(0, "migrating to version %d", cmd.Version)
-		if err := m.MigrateTo(mctx, cmd.Version); err != nil {
-			return err
+		util.Logf(0, "migrating to latest version")
+		merr = m.Migrate(mctx)
+	}
+	if merr != nil {
+		if merr, ok := merr.(migrate.MigrationPgError); ok {
+			if merr.Code == "25001" {
+				util.Logf(-1, "%s: hint: add the following to disable migration transaction wrapping: --pgt:disable-txn", merr.MigrationName)
+			}
 		}
+		return merr
 	}
 
 	if dumper != nil && cmd.Dump != "" {
@@ -129,14 +138,45 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 		if err := m.MigrateTo(mctx, 0); err != nil {
 			return err
 		}
+	}
 
-		if dumper != nil && cmd.DumpDown != "" {
-			util.Logf(0, "dumping post-down to %s", cmd.DumpDown)
-			if err := dumper.Dump(ctx, cmd.DumpDown); err != nil {
-				return err
-			}
+	return nil
+}
+
+type MigrateVersionCommand struct {
+	Database        string `cli:"required,short=d,env=PGT_DATABASE,help=database connection string"`
+	ForceSetVersion *int32 `cli:"help=override current version in version table"`
+	VersionTable    string `cli:"env=PGT_VERSION_TABLE"`
+}
+
+func NewMigrateVersionCommand() *MigrateVersionCommand {
+	return &MigrateVersionCommand{
+		VersionTable: "pgt.schema_version",
+	}
+}
+
+func (cmd *MigrateVersionCommand) Run(ctx context.Context) error {
+	conn, err := pgx.Connect(ctx, cmd.Database)
+	if err != nil {
+		return err
+	}
+
+	m, err := migrate.NewMigrator(ctx, conn, cmd.VersionTable)
+	if err != nil {
+		return err
+	}
+
+	if cmd.ForceSetVersion != nil {
+		if err := m.ForceSetCurrentVersion(ctx, *cmd.ForceSetVersion); err != nil {
+			return err
 		}
 	}
+
+	version, err := m.GetCurrentVersion(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Println(version)
 
 	return nil
 }

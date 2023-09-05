@@ -18,6 +18,7 @@ func main() {
 	cmd := cli.New(
 		"pgt", &CLI{},
 		cli.New("migrate", pgt.NewMigrateCommand()),
+		cli.New("version", pgt.NewMigrateVersionCommand()),
 		cli.New("exec", pgt.NewExecCommand()),
 		cli.New("bench", pgt.NewBenchCommand()),
 	)

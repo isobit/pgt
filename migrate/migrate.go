@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/isobit/pgt/migrate/internal/sqlsplit"
+	"github.com/isobit/pgt/util"
 )
 
 var (
@@ -95,12 +96,8 @@ func NewMigrator(ctx context.Context, conn *pgx.Conn, versionTable string) (m *M
 func NewMigratorEx(ctx context.Context, conn *pgx.Conn, versionTable string, opts *MigratorOptions) (m *Migrator, err error) {
 	m = &Migrator{conn: conn, versionTable: versionTable, options: opts}
 
-	// This is a bit of a kludge for the gengen command. A migrator without a conn is normally not allowed. However, the
-	// gengen command doesn't call any of the methods that require a conn. Potentially, we could refactor Migrator to
-	// split out the migration loading and parsing from the actual migration execution.
-	if conn != nil {
-		err = m.ensureSchemaVersionTableExists(ctx)
-	}
+	err = m.ensureSchemaVersionTableExists(ctx)
+
 	m.Migrations = make([]*Migration, 0)
 	m.Data = make(map[string]interface{})
 	return
@@ -132,7 +129,7 @@ func FindMigrations(fsys fs.FS) ([]string, error) {
 		}
 
 		if n-1 < int64(len(paths)) && paths[n-1] != "" {
-			return nil, fmt.Errorf("Duplicate migration %d", n)
+			return nil, fmt.Errorf("duplicate migration %d", n)
 		}
 
 		// Set at specific index, so that paths are properly sorted
@@ -141,7 +138,7 @@ func FindMigrations(fsys fs.FS) ([]string, error) {
 
 	for i, path := range paths {
 		if path == "" {
-			return nil, fmt.Errorf("Missing migration %d", i+1)
+			return nil, fmt.Errorf("missing migration %d", i+1)
 		}
 	}
 
@@ -274,11 +271,20 @@ const lockNum = uint64(0x49D7B5E9559EB483)
 // echo "obase=16;ibase=16;$(openssl rand -hex 8 | tr '[:lower:]' '[:upper:]') - 7FFFFFFFFFFFFFFF" | bc
 
 func acquireAdvisoryLock(ctx context.Context, conn *pgx.Conn) error {
-	_, err := conn.Exec(ctx, "select pg_advisory_lock($1)", lockNum)
-	return err
+	util.Logf(3, "acquiring advisory lock")
+	var acquired bool
+	if err := conn.QueryRow(ctx, "select pg_try_advisory_lock($1);", lockNum).Scan(&acquired); err != nil {
+		return err
+	}
+	if acquired {
+		return nil
+	}
+	util.Logf(-1, "run this to unlock if last migration crashed: select pg_advisory_unlock(%d)", lockNum)
+	return fmt.Errorf("failed to acquire advisory lock; is another migration being run?")
 }
 
 func releaseAdvisoryLock(ctx context.Context, conn *pgx.Conn) error {
+	util.Logf(3, "releasing advisory lock")
 	_, err := conn.Exec(ctx, "select pg_advisory_unlock($1)", lockNum)
 	return err
 }
@@ -462,6 +468,47 @@ func (m *Migrator) GetCurrentVersion(ctx context.Context) (v int32, err error) {
 	return v, err
 }
 
+func (m *Migrator) ForceSetCurrentVersion(ctx context.Context, v int32) (err error) {
+	err = acquireAdvisoryLock(ctx, m.conn)
+	if err != nil {
+		return
+	}
+	defer func() {
+		unlockErr := releaseAdvisoryLock(ctx, m.conn)
+		if err == nil && unlockErr != nil {
+			err = unlockErr
+		}
+	}()
+
+	txn, err := m.conn.Begin(ctx)
+	if err != nil {
+		return
+	}
+	defer txn.Rollback(ctx)
+
+	if _, err = txn.Exec(ctx, fmt.Sprintf("lock %s;", m.versionTable)); err != nil {
+		return
+	}
+
+	if _, err = txn.Exec(ctx, fmt.Sprintf(`
+	delete from %s
+	where version >= $1;
+	`, m.versionTable), v); err != nil {
+		return
+	}
+
+	if _, err = txn.Exec(ctx, fmt.Sprintf(`
+	insert into %s(version, started_at, finished_at)
+	values ($1, now(), now())
+	`, m.versionTable), v); err != nil {
+		return
+	}
+
+	err = txn.Commit(ctx)
+
+	return
+}
+
 func (m *Migrator) ensureSchemaVersionTableExists(ctx context.Context) (err error) {
 	err = acquireAdvisoryLock(ctx, m.conn)
 	if err != nil {
@@ -475,12 +522,31 @@ func (m *Migrator) ensureSchemaVersionTableExists(ctx context.Context) (err erro
 	}()
 
 	if ok, err := m.versionTableExists(ctx); err != nil || ok {
+		if ok {
+			util.Logf(2, "version table %s already exits, not creating", m.versionTable)
+		}
 		return err
 	}
 
-	_, err = m.conn.Exec(ctx, fmt.Sprintf(`
+	util.Logf(2, "creating version table %s", m.versionTable)
+
+	txn, err := m.conn.Begin(ctx)
+	if err != nil {
+		return
+	}
+	defer txn.Rollback(ctx)
+
+	if i := strings.IndexByte(m.versionTable, '.'); i > 0 {
+		schema := m.versionTable[:i]
+		_, err = txn.Exec(ctx, fmt.Sprintf(`create schema if not exists "%s";`, schema))
+		if err != nil {
+			return
+		}
+	}
+
+	_, err = txn.Exec(ctx, fmt.Sprintf(`
     create table if not exists %s(
-		version int4 not null primary key,
+		version int4 not null primary key check (version >= 0),
 		started_at timestamptz not null default now(),
 		finished_at timestamptz,
 		down_started_at timestamptz
@@ -489,8 +555,14 @@ func (m *Migrator) ensureSchemaVersionTableExists(ctx context.Context) (err erro
     insert into %s(version, started_at, finished_at)
 	values (0, now(), now())
 	on conflict do nothing;
-  `, m.versionTable, m.versionTable))
-	return err
+	`, m.versionTable, m.versionTable))
+	if err != nil {
+		return
+	}
+
+	err = txn.Commit(ctx)
+
+	return
 }
 
 func (m *Migrator) versionTableExists(ctx context.Context) (ok bool, err error) {

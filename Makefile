@@ -13,8 +13,8 @@ lint:
 	go vet ./...
 
 test:
-	# TODO no tests yet
-	# go test ./...
+	@# TODO no tests yet
+	@#go test ./...
 
 clean:
 	rm tmpl
