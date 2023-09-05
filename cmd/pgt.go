@@ -17,8 +17,8 @@ func main() {
 
 	cmd := cli.New(
 		"pgt", &CLI{},
-		cli.New("exec", pgt.NewExecCommand()),
 		cli.New("migrate", pgt.NewMigrateCommand()),
+		cli.New("exec", pgt.NewExecCommand()),
 		cli.New("bench", pgt.NewBenchCommand()),
 	)
 	if err := cmd.Parse().RunWithSigCancel(); err != nil {
