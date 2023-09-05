@@ -27,6 +27,7 @@ func (cmd *ExecCommand) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	defer pool.Close()
 
 	conn, err := util.AcquireWithBlockWatcher(ctx, pool, cmd.MaxBlockDuration)
 	if err != nil {

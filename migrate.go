@@ -2,32 +2,39 @@ package pgt
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
+	"os"
 	"time"
 
-	"github.com/golang-migrate/migrate/v4"
-	migrate_pgx "github.com/golang-migrate/migrate/v4/database/pgx/v5"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/jackc/pgx/v5/pgxpool"
-	pgx_stdlib "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/isobit/pgt/migrate"
 	"github.com/isobit/pgt/util"
 )
 
 type MigrateCommand struct {
-	Database    string `cli:"required,short=d,env=PGT_DATABASE_URL"`
-	Source      string `cli:"required,short=s,env=PGT_MIGRATION_SOURCE"`
-	Version     *uint
-	Test        bool   `cli:"env=PGT_TEST"`
+	Database string `cli:"required,short=d,env=PGT_DATABASE_URL"`
+	Source   string `cli:"required,short=s,env=PGT_MIGRATION_SOURCE"`
+	Version  int32
+
+	Test bool `cli:"env=PGT_TEST"`
+
 	Dump        string `cli:"env=PGT_DUMP"`
 	DumpDown    string `cli:"env=PGT_DUMP_DOWN"`
 	DumpCommand string `cli:"env=PGT_DUMP_COMMAND"`
+
+	VersionTable     string `cli:"env=PGT_VERSION_TABLE"`
+	MaxBlockDuration time.Duration
 }
 
 func NewMigrateCommand() *MigrateCommand {
 	return &MigrateCommand{
+		Version: -1,
+
 		DumpCommand: "pg_dump --schema-only '{{.Url}}'",
+
+		VersionTable:     "schema_version",
+		MaxBlockDuration: 10 * time.Second,
 	}
 }
 
@@ -72,39 +79,41 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 		dumper = d
 	}
 
-	db, err := sql.Open("pgx", pgx_stdlib.RegisterConnConfig(poolCfg.ConnConfig))
-	if err != nil {
-		return fmt.Errorf("error opening postgres: %w", err)
-	}
-	defer db.Close()
+	mctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	mDriver, err := migrate_pgx.WithInstance(db, &migrate_pgx.Config{})
+	pool, err := pgxpool.NewWithConfig(mctx, poolCfg)
 	if err != nil {
-		return fmt.Errorf("error creating migration driver: %w", err)
+		return err
+	}
+	defer pool.Close()
+
+	conn, err := util.AcquireWithBlockWatcher(mctx, pool, cmd.MaxBlockDuration)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+
+	m, err := migrate.NewMigrator(mctx, conn.Conn.Conn(), cmd.VersionTable)
+	if err != nil {
+		return err
+	}
+	if err := m.LoadMigrations(os.DirFS(cmd.Source)); err != nil {
+		return err
+	}
+	m.OnStart = func(sequence int32, name string, direction string, sql string) {
+		util.Logf(0, "starting %s migration for version %d", direction, sequence)
 	}
 
-	m, err := migrate.NewWithDatabaseInstance(
-		cmd.Source,
-		poolCfg.ConnConfig.Database,
-		mDriver,
-	)
-	if err != nil {
-		return fmt.Errorf("error instantiating migration: %w", err)
-	}
-	defer m.Close()
-
-	if cmd.Version != nil {
-		version := *cmd.Version
-		util.Logf(0, "migrating up to version %d", version)
-		if err := m.Migrate(version); err != nil {
-			retainTestDatabase = true
-			return fmt.Errorf("error applying migration: %w", err)
+	if cmd.Version < 0 {
+		util.Logf(0, "migrating to latest version")
+		if err := m.Migrate(mctx); err != nil {
+			return err
 		}
 	} else {
-		util.Logf(0, "migrating up")
-		if err := m.Up(); err != nil {
-			retainTestDatabase = true
-			return fmt.Errorf("error migrating up: %w", err)
+		util.Logf(0, "migrating to version %d", cmd.Version)
+		if err := m.MigrateTo(mctx, cmd.Version); err != nil {
+			return err
 		}
 	}
 
@@ -116,11 +125,11 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 	}
 
 	if cmd.Test {
-		util.Logf(0, "migrating down")
-		if err := m.Down(); err != nil {
-			retainTestDatabase = true
-			return fmt.Errorf("error migrating down: %w", err)
+		util.Logf(0, "migrating down to 0")
+		if err := m.MigrateTo(mctx, 0); err != nil {
+			return err
 		}
+
 		if dumper != nil && cmd.DumpDown != "" {
 			util.Logf(0, "dumping post-down to %s", cmd.DumpDown)
 			if err := dumper.Dump(ctx, cmd.DumpDown); err != nil {
