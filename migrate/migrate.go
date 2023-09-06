@@ -59,6 +59,9 @@ func (e MigrationPgError) Error() string {
 	if e.MigrationName == "" {
 		return e.PgError.Error()
 	}
+	if ex, err := ExtractErrorLine(e.Sql, int(e.Position)); err == nil {
+		return fmt.Sprintf("%s:%d:%d %s", e.MigrationName, ex.LineNum, ex.ColumnNum, e.PgError.Error())
+	}
 	return fmt.Sprintf("%s: %s", e.MigrationName, e.PgError.Error())
 }
 
