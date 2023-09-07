@@ -15,8 +15,7 @@ lint:
 	go vet ./...
 
 test:
-	@# TODO no tests yet
-	@#go test ./...
+	go test ./...
 
 clean:
 	rm $(NAME)

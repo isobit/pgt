@@ -7,7 +7,8 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	// "github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/isobit/pgt/migrate"
@@ -17,13 +18,11 @@ import (
 type MigrateCommand struct {
 	Database string `cli:"required,short=d,env=PGT_DATABASE,help=database connection string"`
 	Source   string `cli:"required,short=s,env=PGT_MIGRATION_SOURCE,help=path to migrations directory"`
-	Target   *int32 `cli:"short=t,env=PGT_MIGRATION_TARGET,help=version to target,default=latest"`
-	// Data map[string]string
+	Target   *int   `cli:"short=t,env=PGT_MIGRATION_TARGET,help=version to target,default=latest"`
 
 	VersionTable string `cli:"env=PGT_VERSION_TABLE"`
 
-	interactive bool
-	Yes         bool `cli:"short=y"`
+	Yes bool `cli:"short=y,help=bypass all confirmation prompts"`
 
 	Test               bool `cli:"env=PGT_TEST,help=enable test mode"`
 	TestDatabaseName   string
@@ -34,6 +33,8 @@ type MigrateCommand struct {
 
 	MaxBlockDuration  time.Duration `cli:"env=PGT_MAX_BLOCK_DURATION"`
 	MaxBlockProcesses int           `cli:"env=PGT_MAX_BLOCK_PROCESSES"`
+
+	interactive bool
 }
 
 func NewMigrateCommand(interactive bool) *MigrateCommand {
@@ -49,12 +50,13 @@ func NewMigrateCommand(interactive bool) *MigrateCommand {
 }
 
 func (cmd *MigrateCommand) Run(ctx context.Context) error {
-	poolCfg, err := pgxpool.ParseConfig(cmd.Database)
+	migrations, err := cmd.loadMigrations()
 	if err != nil {
 		return err
 	}
 
-	if _, err := os.Stat(cmd.Source); err != nil {
+	poolCfg, err := pgxpool.ParseConfig(cmd.Database)
+	if err != nil {
 		return err
 	}
 
@@ -107,19 +109,14 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 	}
 	defer conn.Release()
 
-	m, err := migrate.NewMigrator(mctx, conn.Conn.Conn(), cmd.VersionTable)
-	if err != nil {
-		return err
-	}
-	if err := m.LoadMigrations(os.DirFS(cmd.Source)); err != nil {
-		return err
-	}
-	m.BeforeMigration = func(sequence int32, name string, direction string, sql string) error {
+	m := migrate.NewMigrator(conn.Conn.Conn(), cmd.VersionTable, migrations)
+	m.BeforeExec = func(meta migrate.Meta, step migrate.Step) error {
+		desc := fmt.Sprintf("%d (%s) %s", meta.Version, meta.Name, step.Name)
 		if !(cmd.Yes || cmd.Test) {
 			if cmd.interactive {
 				reprompt := true
 				for reprompt {
-					ans, err := util.Prompt(ctx, fmt.Sprintf("execute %s %s [y/n/?]?", name, direction))
+					ans, err := util.Prompt(ctx, fmt.Sprintf("execute %s [y/n/?]?", desc))
 					if err != nil {
 						return err
 					}
@@ -131,55 +128,59 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 					case "?":
 						r := regexp.MustCompile(`(?m)^`)
 						fmt.Fprintln(os.Stderr)
-						fmt.Fprintln(os.Stderr, r.ReplaceAllLiteralString(sql, "\t"))
+						fmt.Fprintln(os.Stderr, r.ReplaceAllLiteralString(step.SQL, "\t"))
 						fmt.Fprintln(os.Stderr)
 					}
 				}
 			} else {
-				return fmt.Errorf("refusing to execute %s %s in non-interactive mode without -y", name, direction)
+				return fmt.Errorf("refusing to execute %s in non-interactive mode without -y", desc)
 			}
 		}
-		util.Logf(0, "executing %s %s", name, direction)
+		util.Logf(0, "executing %s", desc)
 		return nil
 	}
 
 	var merr error
 	if cmd.Test {
-		for i := 0; i < len(m.Migrations); i += 1 {
-			version := int32(i + 1)
-			util.Logf(0, "testing migration %d", version)
-			merr = m.MigrateTo(mctx, version)
+		for v := 0; v <= m.MaxVersion(); v += 1 {
+			util.Logf(0, "testing migration for version %d", v)
+			merr = m.MigrateTo(mctx, v)
 			if merr != nil {
 				break
 			}
 
-			if m.Migrations[i].DownSQL == "" {
-				util.Logf(0, "skipping down test for irreversible migration %d", version)
+			if m.Migration(v).Down.SQL == "" {
+				util.Logf(0, "skipping down test for irreversible migration version %d", v)
 				continue
 			}
 
 			// Test down and then up again.
-			merr = m.MigrateTo(mctx, version-1)
+			merr = m.MigrateTo(mctx, v-1)
 			if merr != nil {
 				break
 			}
-			merr = m.MigrateTo(mctx, version)
+			merr = m.MigrateTo(mctx, v)
 			if merr != nil {
 				break
 			}
 		}
 	} else if cmd.Target != nil {
-		version := *cmd.Target
-		util.Logf(0, "migrating to version %d", version)
-		merr = m.MigrateTo(mctx, version)
+		targetVersion := *cmd.Target
+		util.Logf(0, "migrating to version %d", targetVersion)
+		merr = m.MigrateTo(mctx, targetVersion)
+		util.Logf(0, "migration to %d complete", targetVersion)
 	} else {
-		util.Logf(0, "migrating to latest version")
-		merr = m.Migrate(mctx)
+		targetVersion := m.MaxVersion()
+		util.Logf(0, "migrating to latest version %d", targetVersion)
+		merr = m.MigrateTo(mctx, targetVersion)
+		util.Logf(0, "migration to %d complete", targetVersion)
 	}
 	if merr != nil {
-		if merr, ok := merr.(migrate.MigrationPgError); ok {
-			if merr.Code == "25001" {
-				util.Logf(-1, "%s: hint: add the following to disable migration transaction wrapping: --pgt:disable-txn", merr.MigrationName)
+		if merr, ok := merr.(migrate.MigrationError); ok {
+			if pgErr, ok := merr.Err.(*pgconn.PgError); ok {
+				if pgErr.Code == "25001" {
+					util.Logf(-1, "%s: hint: add the following to disable migration transaction wrapping: --pgt:no_transaction", merr.Filename)
+				}
 			}
 		}
 		return merr
@@ -192,50 +193,51 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 		}
 	}
 
-	// if cmd.Test {
-	// 	util.Logf(0, "migrating down to 0")
-	// 	if err := m.MigrateTo(mctx, 0); err != nil {
-	// 		return err
-	// 	}
-	// }
-
 	return nil
 }
 
-type MigrateVersionCommand struct {
-	Database        string `cli:"required,short=d,env=PGT_DATABASE,help=database connection string"`
-	ForceSetVersion *int32 `cli:"help=override current version in version table"`
-	VersionTable    string `cli:"env=PGT_VERSION_TABLE"`
+func (cmd *MigrateCommand) loadMigrations() ([]migrate.Migration, error) {
+	if _, err := os.Stat(cmd.Source); err != nil {
+		return nil, err
+	}
+	loader := migrate.NewLoader(os.DirFS(cmd.Source))
+	return loader.Load()
 }
 
-func NewMigrateVersionCommand() *MigrateVersionCommand {
-	return &MigrateVersionCommand{
-		VersionTable: "pgt.schema_version",
-	}
-}
+// type MigrateVersionCommand struct {
+// 	Database        string `cli:"required,short=d,env=PGT_DATABASE,help=database connection string"`
+// 	ForceSetVersion *int32 `cli:"help=override current version in version table"`
+// 	VersionTable    string `cli:"env=PGT_VERSION_TABLE"`
+// }
 
-func (cmd *MigrateVersionCommand) Run(ctx context.Context) error {
-	conn, err := pgx.Connect(ctx, cmd.Database)
-	if err != nil {
-		return err
-	}
+// func NewMigrateVersionCommand() *MigrateVersionCommand {
+// 	return &MigrateVersionCommand{
+// 		VersionTable: "pgt.schema_version",
+// 	}
+// }
 
-	m, err := migrate.NewMigrator(ctx, conn, cmd.VersionTable)
-	if err != nil {
-		return err
-	}
+// func (cmd *MigrateVersionCommand) Run(ctx context.Context) error {
+// 	conn, err := pgx.Connect(ctx, cmd.Database)
+// 	if err != nil {
+// 		return err
+// 	}
 
-	if cmd.ForceSetVersion != nil {
-		if err := m.ForceSetCurrentVersion(ctx, *cmd.ForceSetVersion); err != nil {
-			return err
-		}
-	}
+// 	m, err := migrate.NewMigrator(ctx, conn, cmd.VersionTable)
+// 	if err != nil {
+// 		return err
+// 	}
 
-	version, err := m.GetCurrentVersion(ctx)
-	if err != nil {
-		return err
-	}
-	fmt.Println(version)
+// 	if cmd.ForceSetVersion != nil {
+// 		if err := m.ForceSetCurrentVersion(ctx, *cmd.ForceSetVersion); err != nil {
+// 			return err
+// 		}
+// 	}
 
-	return nil
-}
+// 	version, err := m.GetCurrentVersion(ctx)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	fmt.Println(version)
+
+// 	return nil
+// }
