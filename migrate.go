@@ -146,7 +146,7 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 	var merr error
 	if cmd.Test {
 		for i := 0; i < len(m.Migrations); i += 1 {
-			version := int32(i + 1)
+			version := int32(i)
 			util.Logf(0, "testing migration %d", version)
 			merr = m.MigrateTo(mctx, version)
 			if merr != nil {

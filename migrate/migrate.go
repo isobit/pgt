@@ -98,11 +98,10 @@ func NewMigrator(ctx context.Context, conn *pgx.Conn, versionTable string) (m *M
 // NewMigratorEx initializes a new Migrator. It is highly recommended that versionTable be schema qualified.
 func NewMigratorEx(ctx context.Context, conn *pgx.Conn, versionTable string, opts *MigratorOptions) (m *Migrator, err error) {
 	m = &Migrator{conn: conn, versionTable: versionTable, options: opts}
-
-	err = m.ensureSchemaVersionTableExists(ctx)
-
-	m.Migrations = make([]*Migration, 0)
-	m.Data = make(map[string]interface{})
+	m.Migrations = []*Migration{
+		m.migrationZero(),
+	}
+	m.Data = map[string]interface{}{}
 	return
 }
 
@@ -250,10 +249,11 @@ func (m *Migrator) evalMigration(tmpl *template.Template, sql string) (string, e
 }
 
 func (m *Migrator) AppendMigration(name, upSQL, downSQL string) {
+	sequence := int32(len(m.Migrations))
 	m.Migrations = append(
 		m.Migrations,
 		&Migration{
-			Sequence: int32(len(m.Migrations)) + 1,
+			Sequence: sequence,
 			Name:     name,
 			UpSQL:    upSQL,
 			DownSQL:  downSQL,
@@ -264,7 +264,7 @@ func (m *Migrator) AppendMigration(name, upSQL, downSQL string) {
 // Migrate runs pending migrations
 // It calls m.OnStart when it begins a migration
 func (m *Migrator) Migrate(ctx context.Context) error {
-	return m.MigrateTo(ctx, int32(len(m.Migrations)))
+	return m.MigrateTo(ctx, int32(len(m.Migrations)-1))
 }
 
 // Lock to ensure multiple migrations cannot occur simultaneously
@@ -310,13 +310,13 @@ func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int32) (err erro
 		return err
 	}
 
-	if targetVersion < 0 || int32(len(m.Migrations)) < targetVersion {
+	if targetVersion < -1 || targetVersion >= int32(len(m.Migrations)) {
 		errMsg := fmt.Sprintf("destination version %d is outside the valid versions of 0 to %d", targetVersion, len(m.Migrations))
 		return BadVersionError(errMsg)
 	}
 
-	if currentVersion < 0 || int32(len(m.Migrations)) < currentVersion {
-		errMsg := fmt.Sprintf("current version %d is outside the valid versions of 0 to %d", currentVersion, len(m.Migrations))
+	if currentVersion < -1 || currentVersion >= int32(len(m.Migrations)) {
+		errMsg := fmt.Sprintf("current version %d is outside the valid versions of -1 to %d", currentVersion, len(m.Migrations))
 		return BadVersionError(errMsg)
 	}
 
@@ -332,12 +332,12 @@ func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int32) (err erro
 		var sql, directionName string
 		var sequence int32
 		if direction == 1 {
-			current = m.Migrations[currentVersion]
+			current = m.Migrations[currentVersion+1]
 			sequence = current.Sequence
 			sql = current.UpSQL
 			directionName = "up"
 		} else {
-			current = m.Migrations[currentVersion-1]
+			current = m.Migrations[currentVersion]
 			sequence = current.Sequence - 1
 			sql = current.DownSQL
 			directionName = "down"
@@ -346,14 +346,13 @@ func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int32) (err erro
 			}
 		}
 
-		useTx := !m.options.DisableTx
+		useTx := currentVersion == -1 || !m.options.DisableTx
 		var sqlStatements []string
 		if disableTxPattern.MatchString(sql) {
 			useTx = false
 			sql = disableTxPattern.ReplaceAllLiteralString(sql, "")
 		}
 
-		// BeforeMigration callback
 		if m.BeforeMigration != nil {
 			if err := m.BeforeMigration(current.Sequence, current.Name, directionName, sql); err != nil {
 				return err
@@ -395,6 +394,7 @@ func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int32) (err erro
 
 		// Execute the migration
 		for _, statement := range sqlStatements {
+			util.Logf(3, "exec: %s", statement)
 			_, err = m.conn.Exec(ctx, statement)
 			if err != nil {
 				if err, ok := err.(*pgconn.PgError); ok {
@@ -404,8 +404,12 @@ func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int32) (err erro
 			}
 		}
 
-		// Reset all database connection settings. Important to do before updating version as search_path may have been changed.
-		m.conn.Exec(ctx, "reset all")
+		// Reset all database connection settings. Important to do before
+		// updating version as search_path may have been changed.
+		util.Logf(3, "exec: reset all")
+		if _, err := m.conn.Exec(ctx, "reset all"); err != nil {
+			return err
+		}
 
 		if useTx {
 			// WIP lock reporting
@@ -450,6 +454,7 @@ func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int32) (err erro
 			}
 
 			if direction == 1 {
+				util.Logf(3, "exec: insert version %d", sequence)
 				_, err = m.conn.Exec(ctx, fmt.Sprintf(`
 				insert into %s(version, started_at, finished_at)
 				values ($1, now(), clock_timestamp());
@@ -457,7 +462,8 @@ func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int32) (err erro
 				if err != nil {
 					return err
 				}
-			} else {
+			} else if currentVersion > 0 {
+				util.Logf(3, "exec: delete version %d", sequence)
 				_, err = m.conn.Exec(ctx, fmt.Sprintf(`
 				delete from %s where version = $1
 				`, m.versionTable), currentVersion)
@@ -472,6 +478,7 @@ func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int32) (err erro
 			}
 		} else {
 			if direction == 1 {
+				util.Logf(3, "exec: update version %d set finished", sequence)
 				_, err = m.conn.Exec(ctx, fmt.Sprintf(`
 				update %s set finished_at = now()
 				where version = $1
@@ -479,7 +486,8 @@ func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int32) (err erro
 				if err != nil {
 					return err
 				}
-			} else {
+			} else if currentVersion > 0 {
+				util.Logf(3, "exec: delete version %d", sequence)
 				_, err = m.conn.Exec(ctx, fmt.Sprintf(`
 				delete from %s where version = $1
 				`, m.versionTable), currentVersion)
@@ -495,14 +503,25 @@ func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int32) (err erro
 	return nil
 }
 
-func (m *Migrator) GetCurrentVersion(ctx context.Context) (v int32, err error) {
+func (m *Migrator) GetCurrentVersion(ctx context.Context) (int32, error) {
+	versionTableExists, err := m.versionTableExists(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if !versionTableExists {
+		return -1, nil
+	}
+
+	var v int32
 	var finished_at *time.Time
 	var down_started_at *time.Time
-	err = m.conn.QueryRow(ctx, fmt.Sprintf(`
+	if err := m.conn.QueryRow(ctx, fmt.Sprintf(`
 	select version, finished_at, down_started_at from %s
 	order by version desc
 	limit 1
-	`, m.versionTable)).Scan(&v, &finished_at, &down_started_at)
+	`, m.versionTable)).Scan(&v, &finished_at, &down_started_at); err != nil {
+		return v, err
+	}
 
 	if finished_at == nil || finished_at.IsZero() {
 		return v, fmt.Errorf("migration %d up was never finished", v)
@@ -511,7 +530,7 @@ func (m *Migrator) GetCurrentVersion(ctx context.Context) (v int32, err error) {
 		return v, fmt.Errorf("migration %d down was never finished", v)
 	}
 
-	return v, err
+	return v, nil
 }
 
 func (m *Migrator) ForceSetCurrentVersion(ctx context.Context, v int32) (err error) {
@@ -544,7 +563,7 @@ func (m *Migrator) ForceSetCurrentVersion(ctx context.Context, v int32) (err err
 	}
 
 	if _, err = txn.Exec(ctx, fmt.Sprintf(`
-	insert into %s(version, started_at, finished_at)
+	insert into %s (version, started_at, finished_at)
 	values ($1, now(), now())
 	`, m.versionTable), v); err != nil {
 		return
@@ -555,60 +574,30 @@ func (m *Migrator) ForceSetCurrentVersion(ctx context.Context, v int32) (err err
 	return
 }
 
-func (m *Migrator) ensureSchemaVersionTableExists(ctx context.Context) (err error) {
-	err = acquireAdvisoryLock(ctx, m.conn)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		unlockErr := releaseAdvisoryLock(ctx, m.conn)
-		if err == nil && unlockErr != nil {
-			err = unlockErr
-		}
-	}()
-
-	if ok, err := m.versionTableExists(ctx); err != nil || ok {
-		if ok {
-			util.Logf(2, "version table %s already exits, not creating", m.versionTable)
-		}
-		return err
-	}
-
-	util.Logf(2, "creating version table %s", m.versionTable)
-
-	txn, err := m.conn.Begin(ctx)
-	if err != nil {
-		return
-	}
-	defer txn.Rollback(ctx)
-
+func (m *Migrator) migrationZero() *Migration {
+	var upSql strings.Builder
 	if i := strings.IndexByte(m.versionTable, '.'); i > 0 {
 		schema := m.versionTable[:i]
-		_, err = txn.Exec(ctx, fmt.Sprintf(`create schema if not exists "%s";`, schema))
-		if err != nil {
-			return
-		}
+		fmt.Fprintf(&upSql, `create schema if not exists %s;`, schema)
 	}
+	fmt.Fprintf(
+		&upSql,
+		`
+create table %s (
+	version int4 not null primary key check (version >= 0),
+	started_at timestamptz not null default now(),
+	finished_at timestamptz,
+	down_started_at timestamptz
+);`,
+		m.versionTable,
+	)
 
-	_, err = txn.Exec(ctx, fmt.Sprintf(`
-    create table if not exists %s(
-		version int4 not null primary key check (version >= 0),
-		started_at timestamptz not null default now(),
-		finished_at timestamptz,
-		down_started_at timestamptz
-	);
-
-    insert into %s(version, started_at, finished_at)
-	values (0, now(), now())
-	on conflict do nothing;
-	`, m.versionTable, m.versionTable))
-	if err != nil {
-		return
+	return &Migration{
+		Sequence: 0,
+		Name:     "version_table",
+		UpSQL:    upSql.String(),
+		DownSQL:  fmt.Sprintf(`drop table %s;`, m.versionTable),
 	}
-
-	err = txn.Commit(ctx)
-
-	return
 }
 
 func (m *Migrator) versionTableExists(ctx context.Context) (ok bool, err error) {
