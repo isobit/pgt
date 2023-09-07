@@ -88,17 +88,20 @@ func (w *BlockWatcher) Watch(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			checkCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
-			if err := w.check(checkCtx); err != nil {
-				cancel()
+			if err := w.check(ctx); err != nil {
+				if ctx.Err() == context.Canceled {
+					return nil
+				}
 				return err
 			}
-			cancel()
 		}
 	}
 }
 
 func (w *BlockWatcher) check(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
+	defer cancel()
+
 	Logf(3, "checking if %d is blocking processes", w.pid)
 	rows, err := w.pool.Query(
 		ctx,
