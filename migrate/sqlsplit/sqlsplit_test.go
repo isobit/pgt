@@ -1,11 +1,9 @@
-package sqlsplit_test
+package sqlsplit
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-
-	"github.com/isobit/pgt/migrate/internal/sqlsplit"
 )
 
 func TestSplit(t *testing.T) {
@@ -66,7 +64,7 @@ where id = $1;`,
 				`select 1;`},
 		},
 	} {
-		actual := sqlsplit.Split(tt.sql)
+		actual := Split(tt.sql)
 		assert.Equalf(t, tt.expected, actual, "%d", i)
 	}
 }
