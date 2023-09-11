@@ -64,7 +64,7 @@ func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int) (err error)
 		return err
 	}
 
-	if currentVersion < minVersion || targetVersion > maxVersion {
+	if currentVersion < minVersion || currentVersion > maxVersion {
 		return fmt.Errorf("current version %d is outside the valid version range of %d to %d", currentVersion, minVersion, maxVersion)
 	}
 
