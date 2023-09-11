@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/isobit/cli"
@@ -29,10 +30,19 @@ func main() {
 }
 
 type CLI struct {
-	Verbosity int `cli:"short=v"`
+	Verbosity int  `cli:"short=v,help=set verbosity level"`
+	Version   bool `cli:"short=V,help=show version"`
 }
 
 func (cmd CLI) Before() error {
 	pgt_util.LogLevel = cmd.Verbosity
 	return nil
+}
+
+func (cmd CLI) Run() error {
+	if cmd.Version {
+		fmt.Fprintln(os.Stderr, pgt.Version)
+		return nil
+	}
+	return cli.UsageErrorf("no command specified")
 }
