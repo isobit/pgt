@@ -168,12 +168,16 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 		targetVersion := *cmd.Target
 		util.Logf(0, "migrating to version %d", targetVersion)
 		merr = m.MigrateTo(mctx, targetVersion)
-		util.Logf(0, "migration to %d complete", targetVersion)
+		if merr == nil {
+			util.Logf(0, "migration to %d complete", targetVersion)
+		}
 	} else {
 		targetVersion := m.MaxVersion()
 		util.Logf(0, "migrating to latest version %d", targetVersion)
 		merr = m.MigrateTo(mctx, targetVersion)
-		util.Logf(0, "migration to %d complete", targetVersion)
+		if merr == nil {
+			util.Logf(0, "migration to %d complete", targetVersion)
+		}
 	}
 	if merr != nil {
 		if merr, ok := merr.(migrate.MigrationError); ok {
