@@ -137,12 +137,12 @@ func (m *Migrator) apply(ctx context.Context, migration Migration, down bool) er
 
 	}
 
+	statementPosOffset := 0
 	for _, statement := range sqlStatements {
 		util.Logf(3, "exec: %s", statement)
 		if _, err := m.conn.Exec(ctx, statement); err != nil {
-			if err, ok := err.(*pgconn.PgError); ok {
-				fmt.Println(err.Position)
-				line, col := step.PositionToLineCol(int(err.Position))
+			if err, ok := err.(*pgconn.PgError); ok && err.Position > 0 {
+				line, col := step.PositionToLineCol(int(err.Position) + statementPosOffset)
 				return MigrationError{
 					Err:       err,
 					Meta:      migration.Meta,
@@ -155,6 +155,7 @@ func (m *Migrator) apply(ctx context.Context, migration Migration, down bool) er
 				Meta: migration.Meta,
 			}
 		}
+		statementPosOffset += len(statement) + 1
 	}
 
 	// Reset all database connection settings. Important to do before
