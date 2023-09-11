@@ -28,7 +28,6 @@ type Meta struct {
 
 type StepConfig struct {
 	DisableTransaction bool
-	// Batched bool
 }
 
 type Step struct {
@@ -77,7 +76,7 @@ func (l *Loader) Load() ([]Migration, error) {
 		// Add one to account for version table migration injected by migrator.
 		orderVersion := len(migrations) + 1
 		if version != orderVersion {
-			return nil, fmt.Errorf("migration version %d does not match order position %d", version, orderVersion)
+			return nil, fmt.Errorf("error loading migration %s: version %d does not match order position %d", e.Name(), version, orderVersion)
 		}
 
 		meta := Meta{
