@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"time"
 
-	// "github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -22,7 +21,10 @@ type MigrateCommand struct {
 
 	VersionTable string `cli:"env=PGT_VERSION_TABLE"`
 
-	Yes bool `cli:"short=y,help=bypass all confirmation prompts"`
+	Query bool `cli:"short=q,help=print the current version instead of migrating"`
+
+	Yes       bool `cli:"short=y,help=bypass all confirmation prompts"`
+	ForceSkip bool `cli:"help=forcibly set the schema version to the target skipping any migrations"`
 
 	Test               bool `cli:"env=PGT_TEST,help=enable test mode"`
 	TestDatabaseName   string
@@ -47,6 +49,18 @@ func NewMigrateCommand(interactive bool) *MigrateCommand {
 
 		interactive: interactive,
 	}
+}
+
+func (cmd *MigrateCommand) Before() error {
+	if cmd.ForceSkip {
+		if cmd.Test {
+			return fmt.Errorf("cannot use --force-skip and --test together")
+		}
+		if cmd.Dump != "" {
+			return fmt.Errorf("cannot use --force-skip and --dump together")
+		}
+	}
+	return nil
 }
 
 func (cmd *MigrateCommand) Run(ctx context.Context) error {
@@ -140,9 +154,29 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 		return nil
 	}
 
+	if cmd.Query {
+		version, err := m.CurrentVersion(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Println(version)
+		return nil
+	}
+
+	// Default target version to the max version if none is specified.
+	_, maxVersion := m.VersionRange()
+	targetVersion := maxVersion
+	if cmd.Target != nil {
+		targetVersion = *cmd.Target
+	}
+
+	if cmd.ForceSkip {
+		return m.ForceSkipTo(ctx, targetVersion)
+	}
+
 	var merr error
 	if cmd.Test {
-		for v := 0; v <= m.MaxVersion(); v += 1 {
+		for v := 0; v <= maxVersion; v += 1 {
 			util.Logf(0, "testing migration for version %d", v)
 			merr = m.MigrateTo(mctx, v)
 			if merr != nil {
@@ -164,16 +198,8 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 				break
 			}
 		}
-	} else if cmd.Target != nil {
-		targetVersion := *cmd.Target
-		util.Logf(0, "migrating to version %d", targetVersion)
-		merr = m.MigrateTo(mctx, targetVersion)
-		if merr == nil {
-			util.Logf(0, "migration to %d complete", targetVersion)
-		}
 	} else {
-		targetVersion := m.MaxVersion()
-		util.Logf(0, "migrating to latest version %d", targetVersion)
+		util.Logf(0, "migrating to version %d", targetVersion)
 		merr = m.MigrateTo(mctx, targetVersion)
 		if merr == nil {
 			util.Logf(0, "migration to %d complete", targetVersion)
@@ -207,41 +233,3 @@ func (cmd *MigrateCommand) loadMigrations() ([]migrate.Migration, error) {
 	loader := migrate.NewLoader(os.DirFS(cmd.Source))
 	return loader.Load()
 }
-
-// type MigrateVersionCommand struct {
-// 	Database        string `cli:"required,short=d,env=PGT_DATABASE,help=database connection string"`
-// 	ForceSetVersion *int32 `cli:"help=override current version in version table"`
-// 	VersionTable    string `cli:"env=PGT_VERSION_TABLE"`
-// }
-
-// func NewMigrateVersionCommand() *MigrateVersionCommand {
-// 	return &MigrateVersionCommand{
-// 		VersionTable: "pgt.schema_version",
-// 	}
-// }
-
-// func (cmd *MigrateVersionCommand) Run(ctx context.Context) error {
-// 	conn, err := pgx.Connect(ctx, cmd.Database)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	m, err := migrate.NewMigrator(ctx, conn, cmd.VersionTable)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	if cmd.ForceSetVersion != nil {
-// 		if err := m.ForceSetCurrentVersion(ctx, *cmd.ForceSetVersion); err != nil {
-// 			return err
-// 		}
-// 	}
-
-// 	version, err := m.GetCurrentVersion(ctx)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	fmt.Println(version)
-
-// 	return nil
-// }

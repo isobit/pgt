@@ -32,8 +32,12 @@ func NewMigrator(conn *pgx.Conn, versionTableName string, migrations []Migration
 	}
 }
 
-func (m *Migrator) MaxVersion() int {
-	return len(m.migrations) - 1
+func (m *Migrator) VersionRange() (int, int) {
+	return -1, len(m.migrations) - 1
+}
+
+func (m *Migrator) CurrentVersion(ctx context.Context) (int, error) {
+	return m.vtm.GetCurrentVersion(ctx, m.conn)
 }
 
 func (m *Migrator) Migration(version int) Migration {
@@ -41,25 +45,19 @@ func (m *Migrator) Migration(version int) Migration {
 }
 
 func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int) (err error) {
-	err = acquireAdvisoryLock(ctx, m.conn)
+	release, err := m.acquireLock(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		unlockErr := releaseAdvisoryLock(ctx, m.conn)
-		if err == nil && unlockErr != nil {
-			err = unlockErr
-		}
-	}()
+	defer release()
 
-	minVersion := -1
-	maxVersion := len(m.migrations) - 1
+	minVersion, maxVersion := m.VersionRange()
 
 	if targetVersion < minVersion || targetVersion > maxVersion {
 		return fmt.Errorf("target version %d is outside the valid version range of %d to %d", targetVersion, minVersion, maxVersion)
 	}
 
-	currentVersion, err := m.vtm.GetCurrentVersion(ctx, m.conn)
+	currentVersion, err := m.CurrentVersion(ctx)
 	if err != nil {
 		return err
 	}
@@ -69,8 +67,6 @@ func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int) (err error)
 	}
 
 	down := targetVersion < currentVersion
-
-	// util.Logf(0, "migrating from version %d to version %d", currentVersion, targetVersion)
 	for currentVersion != targetVersion {
 		if !down {
 			currentVersion += 1
@@ -88,6 +84,42 @@ func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int) (err error)
 
 		if down {
 			currentVersion -= 1
+		}
+	}
+
+	return nil
+}
+
+func (m *Migrator) ForceSkipTo(ctx context.Context, targetVersion int) (err error) {
+	release, err := m.acquireLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	minVersion, maxVersion := m.VersionRange()
+
+	if targetVersion < minVersion || targetVersion > maxVersion {
+		return fmt.Errorf("target version %d is outside the valid version range of %d to %d", targetVersion, minVersion, maxVersion)
+	}
+
+	currentVersion, err := m.CurrentVersion(ctx)
+	if err != nil {
+		return err
+	}
+
+	if currentVersion < minVersion || currentVersion > maxVersion {
+		return fmt.Errorf("current version %d is outside the valid version range of %d to %d", currentVersion, minVersion, maxVersion)
+	}
+
+	down := targetVersion < currentVersion
+	for currentVersion != targetVersion {
+		if down {
+			m.vtm.FinishVersionDown(ctx, m.conn, currentVersion)
+			currentVersion -= 1
+		} else {
+			currentVersion += 1
+			m.vtm.InsertVersionUp(ctx, m.conn, currentVersion)
 		}
 	}
 
@@ -196,6 +228,29 @@ func (m *Migrator) apply(ctx context.Context, migration Migration, down bool) er
 	return nil
 }
 
+// Lock to ensure multiple migrations cannot occur simultaneously.
+// Constant is arbitrary random number; can be regenerated with
+// echo "obase=16;ibase=16;$(openssl rand -hex 8 | tr '[:lower:]' '[:upper:]') - 7FFFFFFFFFFFFFFF" | bc
+const lockNum = uint64(0x49D7B5E9559EB483)
+
+func (m *Migrator) acquireLock(ctx context.Context) (func(), error) {
+	util.Logf(3, "acquiring advisory lock")
+	var acquired bool
+	if err := m.conn.QueryRow(ctx, "select pg_try_advisory_lock($1);", lockNum).Scan(&acquired); err != nil {
+		return nil, err
+	}
+	if !acquired {
+		util.Logf(-1, "run this to unlock if last migration crashed: select pg_advisory_unlock(%d)", lockNum)
+		return nil, fmt.Errorf("failed to acquire advisory lock; is another migration being run?")
+	}
+	return func() {
+		util.Logf(3, "releasing advisory lock")
+		if _, err := m.conn.Exec(ctx, "select pg_advisory_unlock($1)", lockNum); err != nil {
+			util.Logf(-1, "error releasing advisory lock: %s", err)
+		}
+	}, nil
+}
+
 type MigrationError struct {
 	Err error
 	Meta
@@ -211,28 +266,4 @@ func (e MigrationError) Error() string {
 		return fmt.Sprintf("%s:%d: %s", e.Filename, e.LineNum, e.Err)
 	}
 	return fmt.Sprintf("%s:%d:%d: %s", e.Filename, e.LineNum, e.ColumnNum, e.Err)
-}
-
-// Lock to ensure multiple migrations cannot occur simultaneously.
-// Constant is arbitrary random number; can be regenerated with
-// echo "obase=16;ibase=16;$(openssl rand -hex 8 | tr '[:lower:]' '[:upper:]') - 7FFFFFFFFFFFFFFF" | bc
-const lockNum = uint64(0x49D7B5E9559EB483)
-
-func acquireAdvisoryLock(ctx context.Context, conn *pgx.Conn) error {
-	util.Logf(3, "acquiring advisory lock")
-	var acquired bool
-	if err := conn.QueryRow(ctx, "select pg_try_advisory_lock($1);", lockNum).Scan(&acquired); err != nil {
-		return err
-	}
-	if acquired {
-		return nil
-	}
-	util.Logf(-1, "run this to unlock if last migration crashed: select pg_advisory_unlock(%d)", lockNum)
-	return fmt.Errorf("failed to acquire advisory lock; is another migration being run?")
-}
-
-func releaseAdvisoryLock(ctx context.Context, conn *pgx.Conn) error {
-	util.Logf(3, "releasing advisory lock")
-	_, err := conn.Exec(ctx, "select pg_advisory_unlock($1)", lockNum)
-	return err
 }
