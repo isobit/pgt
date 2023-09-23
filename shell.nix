@@ -4,5 +4,7 @@ pkgs.mkShell {
     gnumake
     go
     golangci-lint
+
+    postgresql
   ];
 }
