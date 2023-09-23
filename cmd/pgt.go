@@ -19,9 +19,9 @@ func main() {
 	cmd := cli.New(
 		"pgt", &CLI{},
 		cli.New("migrate", pgt.NewMigrateCommand(interactive)),
-		// cli.New("version", pgt.NewMigrateVersionCommand()),
 		cli.New("exec", pgt.NewExecCommand()),
 		cli.New("bench", pgt.NewBenchCommand()),
+		cli.New("mux", pgt.NewMuxCommand()),
 	)
 	if err := cmd.Parse().RunWithSigCancel(); err != nil {
 		pgt_util.Logf(-2, "%s", err)
