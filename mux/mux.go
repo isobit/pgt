@@ -75,13 +75,16 @@ type MuxServerConn struct {
 	sync.Mutex
 	*pgconn.HijackedConn
 	*pgproto3.Frontend
-	recvCh   chan pgproto3.BackendMessage
-	refcount int
+	refcount      int
+	recvCh        <-chan pgproto3.BackendMessage
+	recvBroadcast *Broadcast[pgproto3.BackendMessage]
 }
 
 func NewMuxServerConn(conn *pgconn.HijackedConn) *MuxServerConn {
 	frontend := conn.Frontend
 	recvCh := make(chan pgproto3.BackendMessage)
+	recvBroadcast := NewBroadcast[pgproto3.BackendMessage]()
+
 	go func() {
 		defer close(recvCh)
 		for {
@@ -92,15 +95,25 @@ func NewMuxServerConn(conn *pgconn.HijackedConn) *MuxServerConn {
 				}
 				return
 			}
-			recvCh <- msg
+			switch msg.(type) {
+			case
+				*pgproto3.NotificationResponse,
+				*pgproto3.ParameterStatus,
+				*pgproto3.NoticeResponse:
+
+				recvBroadcast.Send(msg)
+			default:
+				recvCh <- msg
+			}
 		}
 	}()
 
 	return &MuxServerConn{
-		HijackedConn: conn,
-		Frontend:     frontend,
-		recvCh:       recvCh,
-		refcount:     1,
+		HijackedConn:  conn,
+		Frontend:      frontend,
+		refcount:      1,
+		recvCh:        recvCh,
+		recvBroadcast: recvBroadcast,
 	}
 }
 
@@ -235,7 +248,25 @@ func (m *Mux) HandleConn(ctx context.Context, clientNetConn net.Conn) error {
 		return fmt.Errorf("error sending response to startup message: %w", err)
 	}
 
+	go func() {
+		broadcastCh := serverConn.recvBroadcast.Subscribe()
+		defer serverConn.recvBroadcast.Unsubscribe(broadcastCh)
+		for {
+			msg, ok := <-broadcastCh
+			if !ok {
+				return
+			}
+			if util.LogLevel >= 3 {
+				util.Logf(3, "server -> client: broadcast: %s %+v", reflect.TypeOf(msg), msg)
+			}
+			clientConn.Send(msg)
+			if err := clientConn.Flush(); err != nil {
+				return
+			}
+		}
+	}()
 	clientConn.startReceiver()
+
 	for {
 		msg, ok := <-clientConn.recvCh
 		if !ok {
@@ -257,7 +288,9 @@ func handleCommandCycle(clientConn *MuxClientConn, serverConn *MuxServerConn, in
 	util.Logf(3, "begin command cycle for client %s", clientConn.RemoteAddr())
 	defer util.Logf(3, "end command cycle for client %s", clientConn.RemoteAddr())
 
-	util.Logf(3, "client -> server: %+v", initialMsg)
+	if util.LogLevel >= 3 {
+		util.Logf(3, "client -> server: %s %+v", reflect.TypeOf(initialMsg), initialMsg)
+	}
 	serverConn.Send(initialMsg)
 	if err := serverConn.Flush(); err != nil {
 		return err
