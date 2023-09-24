@@ -3,15 +3,15 @@ package mux
 import (
 	"context"
 	"errors"
-	"io"
 	"fmt"
+	"io"
 	"net"
-	"sync"
 	"reflect"
+	"sync"
 
-	"github.com/jackc/pgx/v5/pgproto3"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/isobit/pgt/util"
 )
@@ -24,7 +24,7 @@ func Listen(ctx context.Context, database string, listenAddr string) error {
 
 	cm := &Mux{
 		connConfig: pgCfg,
-		conns: map[string]*MuxServerConn{},
+		conns:      map[string]*MuxServerConn{},
 	}
 
 	addr, err := net.ResolveTCPAddr("tcp", listenAddr)
@@ -97,17 +97,17 @@ func NewMuxServerConn(conn *pgconn.HijackedConn) *MuxServerConn {
 	}()
 
 	return &MuxServerConn{
-		HijackedConn:     conn,
-		Frontend: frontend,
-		recvCh:   recvCh,
-		refcount: 1,
+		HijackedConn: conn,
+		Frontend:     frontend,
+		recvCh:       recvCh,
+		refcount:     1,
 	}
 }
 
 type MuxClientConn struct {
 	net.Conn
 	*pgproto3.Backend
-	recvCh   chan pgproto3.FrontendMessage
+	recvCh chan pgproto3.FrontendMessage
 }
 
 func NewMuxClientConn(conn net.Conn) *MuxClientConn {
@@ -118,9 +118,9 @@ func NewMuxClientConn(conn net.Conn) *MuxClientConn {
 	recvCh := make(chan pgproto3.FrontendMessage)
 
 	return &MuxClientConn{
-		Conn: conn,
+		Conn:    conn,
 		Backend: backend,
-		recvCh: recvCh,
+		recvCh:  recvCh,
 	}
 }
 
@@ -143,7 +143,7 @@ func (c *MuxClientConn) startReceiver() {
 type Mux struct {
 	sync.Mutex
 	connConfig *pgx.ConnConfig
-	conns map[string]*MuxServerConn
+	conns      map[string]*MuxServerConn
 }
 
 func (m *Mux) acquire(ctx context.Context, key string) (*MuxServerConn, error) {
