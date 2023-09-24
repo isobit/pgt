@@ -3,25 +3,28 @@ package mux
 import (
 	"context"
 	"errors"
+	"io"
 	"fmt"
 	"net"
 	"sync"
+	"reflect"
 
 	"github.com/jackc/pgx/v5/pgproto3"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/isobit/pgt/util"
 )
 
 func Listen(ctx context.Context, database string, listenAddr string) error {
-	pool, err := pgxpool.New(ctx, database)
+	pgCfg, err := pgx.ParseConfig(database)
 	if err != nil {
 		return err
 	}
 
 	cm := &Mux{
-		pool:  pool,
-		conns: map[string]*MuxConn{},
+		connConfig: pgCfg,
+		conns: map[string]*MuxServerConn{},
 	}
 
 	addr, err := net.ResolveTCPAddr("tcp", listenAddr)
@@ -48,9 +51,9 @@ func Listen(ctx context.Context, database string, listenAddr string) error {
 				return nil
 			}
 			if conn != nil {
-				util.Logf(-1, "accept error: %s: %s", conn.RemoteAddr(), err)
+				util.Logf(-2, "accept error: %s: %s", conn.RemoteAddr(), err)
 			} else {
-				util.Logf(-1, "accept error: %s", err)
+				util.Logf(-2, "accept error: %s", err)
 			}
 			continue
 		}
@@ -62,72 +65,121 @@ func Listen(ctx context.Context, database string, listenAddr string) error {
 			defer util.Logf(1, "closed: %s", remoteAddr)
 
 			if err := cm.HandleConn(ctx, conn); err != nil {
-				util.Logf(-1, "%s", err)
+				util.Logf(-2, "%s", err)
 			}
 		}()
 	}
 }
 
-type MuxConn struct {
+type MuxServerConn struct {
 	sync.Mutex
-	*pgxpool.Conn
+	*pgconn.HijackedConn
+	*pgproto3.Frontend
 	recvCh   chan pgproto3.BackendMessage
 	refcount int
 }
 
-func NewMuxConn(conn *pgxpool.Conn) *MuxConn {
-	frontend := conn.Conn().PgConn().Frontend()
+func NewMuxServerConn(conn *pgconn.HijackedConn) *MuxServerConn {
+	frontend := conn.Frontend
 	recvCh := make(chan pgproto3.BackendMessage)
 	go func() {
 		defer close(recvCh)
 		for {
 			msg, err := frontend.Receive()
 			if err != nil {
-				util.Logf(-1, "receive error: %s", err)
+				if !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.ErrUnexpectedEOF) {
+					util.Logf(-1, "server receive error: %s", err)
+				}
 				return
 			}
 			recvCh <- msg
 		}
 	}()
 
-	return &MuxConn{
-		Conn:     conn,
+	return &MuxServerConn{
+		HijackedConn:     conn,
+		Frontend: frontend,
 		recvCh:   recvCh,
 		refcount: 1,
 	}
 }
 
-type Mux struct {
-	sync.Mutex
-	pool  *pgxpool.Pool
-	conns map[string]*MuxConn
+type MuxClientConn struct {
+	net.Conn
+	*pgproto3.Backend
+	recvCh   chan pgproto3.FrontendMessage
 }
 
-func (cm *Mux) acquire(ctx context.Context, key string) (*MuxConn, error) {
-	cm.Lock()
-	defer cm.Unlock()
+func NewMuxClientConn(conn net.Conn) *MuxClientConn {
+	backend := pgproto3.NewBackend(conn, conn)
+	if util.LogLevel >= 4 {
+		backend.Trace(util.Log, pgproto3.TracerOptions{})
+	}
+	recvCh := make(chan pgproto3.FrontendMessage)
 
-	if conn, ok := cm.conns[key]; ok {
+	return &MuxClientConn{
+		Conn: conn,
+		Backend: backend,
+		recvCh: recvCh,
+	}
+}
+
+func (c *MuxClientConn) startReceiver() {
+	go func() {
+		defer close(c.recvCh)
+		for {
+			msg, err := c.Receive()
+			if err != nil {
+				if !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.ErrUnexpectedEOF) {
+					util.Logf(-1, "client receive error: %s", err)
+				}
+				return
+			}
+			c.recvCh <- msg
+		}
+	}()
+}
+
+type Mux struct {
+	sync.Mutex
+	connConfig *pgx.ConnConfig
+	conns map[string]*MuxServerConn
+}
+
+func (m *Mux) acquire(ctx context.Context, key string) (*MuxServerConn, error) {
+	m.Lock()
+	defer m.Unlock()
+
+	if conn, ok := m.conns[key]; ok {
 		conn.Lock()
 		defer conn.Unlock()
 		conn.refcount++
 		return conn, nil
 	}
 
-	pgConn, err := cm.pool.Acquire(ctx)
+	pgxConn, err := pgx.ConnectConfig(ctx, m.connConfig)
 	if err != nil {
 		return nil, err
 	}
-	conn := NewMuxConn(pgConn)
-	cm.conns[key] = conn
+	pgConn := pgxConn.PgConn()
+	if err := pgConn.SyncConn(ctx); err != nil {
+		return nil, err
+	}
+	hijackedPgConn, err := pgConn.Hijack()
+	if err != nil {
+		return nil, err
+	}
+
+	conn := NewMuxServerConn(hijackedPgConn)
+	m.conns[key] = conn
 	return conn, nil
 }
 
-func (cm *Mux) release(ctx context.Context, key string) {
-	cm.Lock()
-	defer cm.Unlock()
+func (m *Mux) release(ctx context.Context, key string) {
+	m.Lock()
+	defer m.Unlock()
 
-	conn, ok := cm.conns[key]
+	conn, ok := m.conns[key]
 	if !ok {
 		return
 	}
@@ -136,92 +188,113 @@ func (cm *Mux) release(ctx context.Context, key string) {
 	defer conn.Unlock()
 	conn.refcount--
 	if conn.refcount <= 0 {
-		conn.Release()
-		delete(cm.conns, key)
+		delete(m.conns, key)
 	}
 }
 
-func (cm *Mux) HandleConn(ctx context.Context, conn net.Conn) error {
+func (m *Mux) HandleConn(ctx context.Context, clientNetConn net.Conn) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	remoteAddr := conn.RemoteAddr()
-
-	backend := pgproto3.NewBackend(conn, conn)
+	clientConn := NewMuxClientConn(clientNetConn)
 
 	util.Logf(3, "receiving startup message")
-	msg, err := cm.handleStartup(conn, backend)
+	msg, err := handleStartup(clientConn)
 	if err != nil {
 		return fmt.Errorf("error in startup: %w", err)
 	}
 
 	key, ok := msg.Parameters["database"]
 	if !ok {
-		key = remoteAddr.String()
+		key = clientConn.RemoteAddr().String()
 	}
 	util.Logf(3, "conn key: %s", key)
-	pgConn, err := cm.acquire(ctx, key)
+	serverConn, err := m.acquire(ctx, key)
 	if err != nil {
+		clientConn.Send(&pgproto3.ErrorResponse{Message: err.Error()})
+		clientConn.Flush()
 		return err
 	}
-	defer cm.release(ctx, key)
+	defer m.release(ctx, key)
 
-	backend.Send(&pgproto3.AuthenticationOk{})
-	backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-	if err := backend.Flush(); err != nil {
+	util.Logf(3, "sending AuthenticationOk")
+	clientConn.Send(&pgproto3.AuthenticationOk{})
+
+	util.Logf(3, "sending ParameterStatus")
+	serverConn.Lock()
+	for name, val := range serverConn.ParameterStatuses {
+		util.Logf(3, "sending ParameterStatus{Name: %s, Value: %s}", name, val)
+		clientConn.Send(&pgproto3.ParameterStatus{Name: name, Value: val})
+	}
+	serverConn.Unlock()
+
+	util.Logf(3, "sending ReadyForQuery")
+	clientConn.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+
+	if err := clientConn.Flush(); err != nil {
 		return fmt.Errorf("error sending response to startup message: %w", err)
 	}
 
-	clientCh := make(chan pgproto3.FrontendMessage)
-	go func() {
-		defer close(clientCh)
-		for {
-			msg, err := backend.Receive()
-			if err != nil {
-				// return fmt.Errorf("backend receive error: %w", err)
-				return
-			}
-			clientCh <- msg
-		}
-	}()
-
-	frontend := pgConn.Conn.Conn().PgConn().Frontend()
+	clientConn.startReceiver()
 	for {
-		msg := <-clientCh
+		msg, ok := <-clientConn.recvCh
+		if !ok {
+			util.Logf(3, "client closed")
+			return nil
+		}
 		if msg, ok := msg.(*pgproto3.Terminate); ok {
 			util.Logf(3, "got terminate message: %+v", msg)
 			return nil
 		}
-		util.Logf(3, "client -> server: %+v", msg)
-		frontend.Send(msg)
-		frontend.Flush()
-
-		pgConn.Lock()
-
-	L:
-		for {
-			select {
-			case clientMsg := <-clientCh:
-				util.Logf(3, "client -> server: %+v", clientMsg)
-				frontend.Send(clientMsg)
-				frontend.Flush()
-			case serverMsg := <-pgConn.recvCh:
-				util.Logf(3, "server -> client: %+v", serverMsg)
-				backend.Send(serverMsg)
-				backend.Flush()
-				if _, ok := serverMsg.(*pgproto3.ReadyForQuery); ok {
-					util.Logf(3, "got ReadyForQuery, breaking to yield")
-					break L
-				}
-			}
-		}
-
-		pgConn.Unlock()
+		handleCommandCycle(clientConn, serverConn, msg)
 	}
 }
 
-func (cm *Mux) handleStartup(conn net.Conn, backend *pgproto3.Backend) (*pgproto3.StartupMessage, error) {
-	msg, err := backend.ReceiveStartupMessage()
+func handleCommandCycle(clientConn *MuxClientConn, serverConn *MuxServerConn, initialMsg pgproto3.FrontendMessage) error {
+	serverConn.Lock()
+	defer serverConn.Unlock()
+
+	util.Logf(3, "begin command cycle for client %s", clientConn.RemoteAddr())
+	defer util.Logf(3, "end command cycle for client %s", clientConn.RemoteAddr())
+
+	util.Logf(3, "client -> server: %+v", initialMsg)
+	serverConn.Send(initialMsg)
+	if err := serverConn.Flush(); err != nil {
+		return err
+	}
+
+	for {
+		select {
+		case clientMsg, ok := <-clientConn.recvCh:
+			if !ok {
+				util.Logf(3, "client closed")
+				return nil
+			}
+			if util.LogLevel >= 3 {
+				util.Logf(3, "client -> server: %s %+v", reflect.TypeOf(clientMsg), clientMsg)
+			}
+			serverConn.Send(clientMsg)
+			serverConn.Flush()
+		case serverMsg, ok := <-serverConn.recvCh:
+			if !ok {
+				util.Logf(3, "server closed")
+				return nil
+			}
+			if util.LogLevel >= 3 {
+				util.Logf(3, "server -> client: %s %+v", reflect.TypeOf(serverMsg), serverMsg)
+			}
+			clientConn.Send(serverMsg)
+			clientConn.Flush()
+			if _, ok := serverMsg.(*pgproto3.ReadyForQuery); ok {
+				util.Logf(3, "got ReadyForQuery")
+				return nil
+			}
+		}
+	}
+}
+
+func handleStartup(conn *MuxClientConn) (*pgproto3.StartupMessage, error) {
+	msg, err := conn.ReceiveStartupMessage()
 	if err != nil {
 		return nil, fmt.Errorf("error receiving startup message: %w", err)
 	}
@@ -234,7 +307,7 @@ func (cm *Mux) handleStartup(conn net.Conn, backend *pgproto3.Backend) (*pgproto
 		if _, err := conn.Write([]byte{'N'}); err != nil {
 			return nil, fmt.Errorf("error sending deny SSL request: %w", err)
 		}
-		return cm.handleStartup(conn, backend)
+		return handleStartup(conn)
 	default:
 		return nil, fmt.Errorf("invalid startup msg")
 	}
