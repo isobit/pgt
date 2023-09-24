@@ -8,6 +8,7 @@ import (
 	"net"
 	"reflect"
 	"sync"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -61,11 +62,11 @@ func Listen(ctx context.Context, database string, listenAddr string) error {
 			defer conn.Close()
 
 			remoteAddr := conn.RemoteAddr()
-			util.Logf(1, "accepted: %s", remoteAddr)
+			util.Logf(2, "accepted: %s", remoteAddr)
 			defer util.Logf(1, "closed: %s", remoteAddr)
 
 			if err := cm.HandleConn(ctx, conn); err != nil {
-				util.Logf(-2, "%s", err)
+				util.Logf(-2, "error handling %s: %s", remoteAddr, err)
 			}
 		}()
 	}
@@ -217,11 +218,17 @@ func (m *Mux) HandleConn(ctx context.Context, clientNetConn net.Conn) error {
 		return fmt.Errorf("error in startup: %w", err)
 	}
 
-	key, ok := msg.Parameters["database"]
-	if !ok {
+	var key string
+	if dbname, ok := msg.Parameters["database"]; ok {
+		if _, keypart, ok := strings.Cut(dbname, "@"); ok {
+			key = keypart
+		}
+	}
+	if key == "" {
 		key = clientConn.RemoteAddr().String()
 	}
-	util.Logf(3, "conn key: %s", key)
+	util.Logf(1, "accepted %s with key %s", clientConn.RemoteAddr(), key)
+
 	serverConn, err := m.acquire(ctx, key)
 	if err != nil {
 		clientConn.Send(&pgproto3.ErrorResponse{Message: err.Error()})
