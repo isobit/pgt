@@ -7,8 +7,8 @@ import (
 	"io"
 	"net"
 	"reflect"
-	"sync"
 	"strings"
+	"sync"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
