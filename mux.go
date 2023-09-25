@@ -14,7 +14,7 @@ type MuxCommand struct {
 }
 
 func (*MuxCommand) SetupCommand(cmd *cli.Command) {
-	cmd.SetHelp("simple and production-safe plain SQL migrations")
+	cmd.SetHelp("proxy that can multiplex connections/sessions")
 	cmd.SetDescription(`
 		Proxies PostgreSQL protocol TCP connections to the specified listen
 		address to the specified upstream database.

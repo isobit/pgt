@@ -18,6 +18,7 @@ func main() {
 
 	cmd := cli.New(
 		"pgt", &CLI{},
+		cli.WithDescription("Pretty Good Tools for PostgreSQL"),
 		cli.New("migrate", pgt.NewMigrateCommand(interactive)),
 		cli.New("exec", pgt.NewExecCommand()),
 		cli.New("bench", pgt.NewBenchCommand()),
