@@ -33,10 +33,10 @@ func (*MuxCommand) SetupCommand(cmd *cli.Command) {
 
 		Example using an explicit session key:
 
-			$ pgt mux -d postgres://localhost:5432/postgres -l localhost:5433
-			# These will both connect to the same session:
-			$ psql postgres://localhost:5433/@foo
-			$ psql postgres://localhost:5433/@foo
+		  $ pgt mux -d postgres://localhost:5432/postgres -l localhost:5433
+		  # These will both connect to the same session:
+		  $ psql postgres://localhost:5433/@foo
+		  $ psql postgres://localhost:5433/@foo
 	`)
 }
 
