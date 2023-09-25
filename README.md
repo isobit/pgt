@@ -2,7 +2,12 @@
 
 :warning: Currently a work-in-progress.
 
-`pgt` is a collection of tools for PostgreSQL.
+`pgt` is a collection of tools for PostgreSQL:
+
+- `bench` is a tool for running benchmarks written as SQL Go templates
+- `migrate` is a simple and production-safe plain SQL migration system
+- `mux` is a PostgreSQL protocol proxy that can multiplex connections/sessions
+    (useful for debugging in-progress transactions)
 
 ## Migrations
 
@@ -15,7 +20,7 @@ Features:
 - Convenience for dumping schema SQL (--dump flag that calls pg_dump or custom command, e.g. exec'ing pg_dump in a docker container)
 - Test mode that automatically creates an isolated test database, runs each migration (up+down+up or just up if irreversible)
 - Interactive mode which can prompt for each migration and show SQL
-- Version table bootstrapping is implemented as reviewable, expliclitly built-in "zero migration".
+- Version table bootstrapping is implemented as reviewable, explicitly built-in "zero migration".
 - Migrations are very nearly plain SQL (special directives are just comments)
 
 Possible future features:

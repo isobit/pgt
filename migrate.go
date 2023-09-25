@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"time"
 
-	// "github.com/jackc/pgx/v5"
+	"github.com/isobit/cli"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -35,6 +35,32 @@ type MigrateCommand struct {
 	MaxBlockProcesses int           `cli:"env=PGT_MAX_BLOCK_PROCESSES"`
 
 	interactive bool
+}
+
+func (*MigrateCommand) SetupCommand(cmd *cli.Command) {
+	cmd.SetHelp("simple and production-safe plain SQL migrations")
+	cmd.SetDescription(`
+		Migrate reads migration SQL files from the specified source directory
+		and applies them in sequence until the recorded database version
+		matches the specified target version.
+
+		Version numbers are serial integers starting from 1, with version 0
+		representing the bootstrapping of the schema version table. Migration
+		SQL files must be named starting with a padded version number followed
+		by an underscore ("_"), such that their lexicographic order follows
+		their numeric order. For example: "001_my-migration.sql",
+		"002-my-next-migration.sql", etc.
+
+		Migrations are each run in a transaction by default, unless the special
+		comment "--pgt:no_transaction" is present in the step being applied in
+		the migration SQL file. Migrations can be made reversible by including
+		a line with the special comment "--pgt:down" followed by the SQL for
+		performing the reversal (the "down" step).
+
+		By default, a prompt will be presented at each step to confirm and give
+		a chance to review before applying; this can be bypassed with the
+		"--yes" flag.
+	`)
 }
 
 func NewMigrateCommand(interactive bool) *MigrateCommand {
@@ -207,41 +233,3 @@ func (cmd *MigrateCommand) loadMigrations() ([]migrate.Migration, error) {
 	loader := migrate.NewLoader(os.DirFS(cmd.Source))
 	return loader.Load()
 }
-
-// type MigrateVersionCommand struct {
-// 	Database        string `cli:"required,short=d,env=PGT_DATABASE,help=database connection string"`
-// 	ForceSetVersion *int32 `cli:"help=override current version in version table"`
-// 	VersionTable    string `cli:"env=PGT_VERSION_TABLE"`
-// }
-
-// func NewMigrateVersionCommand() *MigrateVersionCommand {
-// 	return &MigrateVersionCommand{
-// 		VersionTable: "pgt.schema_version",
-// 	}
-// }
-
-// func (cmd *MigrateVersionCommand) Run(ctx context.Context) error {
-// 	conn, err := pgx.Connect(ctx, cmd.Database)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	m, err := migrate.NewMigrator(ctx, conn, cmd.VersionTable)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	if cmd.ForceSetVersion != nil {
-// 		if err := m.ForceSetCurrentVersion(ctx, *cmd.ForceSetVersion); err != nil {
-// 			return err
-// 		}
-// 	}
-
-// 	version, err := m.GetCurrentVersion(ctx)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	fmt.Println(version)
-
-// 	return nil
-// }
