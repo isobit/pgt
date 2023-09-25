@@ -17,6 +17,32 @@ import (
 	"github.com/isobit/pgt/internal/util"
 )
 
+// Connection multiplexing is implemented as follows:
+//
+// 1. The client start-up flow is handled entirely by the proxy. Proper
+//    authentication is not implemented yet, the proxy will accept any client.
+//
+// 2. Upstream server connections are established lazily per session.
+//    Backend parameters from the upstream connection are forwarded during
+//    client start-up (things like e.g. client_encoding are critical for some
+//    clients).
+//
+// 3. When a command cycle initiating message is received from a client, it
+//    will take exclusive control of the upstream connection for the duration
+//    of the command cycle. If another client is performing a command cycle, it
+//    will wait for that client to finish. The ReadyForQuery backend message
+//    signals the end of a command cycle, so that's the yield point where
+//    clients can alternate between using a shared session.
+//
+// 4. There is a separate mechanism which sends (broadcasts) asynchronous
+//    operation backend messages like NoticeResponse, ParameterStatus, and
+//    NotificationResponse to all clients as soon as they are received; this
+//    happens regardless of any command cycles.
+//
+// 5. When clients disconnect, the upstream server connection reference count
+//    is decremented. When the refcount reaches 0, the connection is not needed
+//    by any clients, so it is closed.
+
 func Listen(ctx context.Context, database string, listenAddr string) error {
 	pgCfg, err := pgx.ParseConfig(database)
 	if err != nil {
