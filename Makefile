@@ -1,15 +1,14 @@
 NAME := pgt
-PACKAGE := github.com/isobit/pgt
 
 VERSION := $(if $(VERSION),$(VERSION),$(shell git describe --tags --match 'v*' HEAD))
-LDFLAGS := -X $(PACKAGE).Version=$(VERSION)
+LDFLAGS := -X main.Version=$(VERSION)
 
 .PHONY: all build fmt test lint
 
 all: build fmt lint test
 
 build:
-	go build -ldflags "$(LDFLAGS)" ./cmd/$(NAME).go
+	go build -ldflags "$(LDFLAGS)" .
 
 fmt:
 	go fmt ./...
@@ -39,4 +38,4 @@ dist: $(DISTS)
 $(DISTS): _dist/$(NAME)-%:
 	mkdir -p _dist
 	CGO_ENABLED=0 GOOS=$(word 1,$(subst -, ,$*)) GOARCH=$(word 2,$(subst -, ,$*)) \
-		go build -ldflags "$(LDFLAGS)" -o $@ ./cmd/$(NAME).go
+		go build -ldflags "$(LDFLAGS)" -o $@ .

@@ -1,4 +1,4 @@
-package pgt
+package exec
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	util "github.com/isobit/pgt/util"
+	"github.com/isobit/pgt/internal/util"
 )
 
 type ExecCommand struct {

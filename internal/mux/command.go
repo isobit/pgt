@@ -1,11 +1,9 @@
-package pgt
+package mux
 
 import (
 	"context"
 
 	"github.com/isobit/cli"
-
-	"github.com/isobit/pgt/mux"
 )
 
 type MuxCommand struct {
@@ -45,5 +43,5 @@ func NewMuxCommand() *MuxCommand {
 }
 
 func (cmd *MuxCommand) Run(ctx context.Context) error {
-	return mux.Listen(ctx, cmd.Database, cmd.ListenAddr)
+	return Listen(ctx, cmd.Database, cmd.ListenAddr)
 }

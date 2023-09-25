@@ -5,27 +5,33 @@ import (
 	"os"
 
 	"github.com/isobit/cli"
-	"github.com/isobit/pgt"
-	pgt_util "github.com/isobit/pgt/util"
+
+	"github.com/isobit/pgt/internal/bench"
+	"github.com/isobit/pgt/internal/exec"
+	"github.com/isobit/pgt/internal/migrate"
+	"github.com/isobit/pgt/internal/mux"
+	"github.com/isobit/pgt/internal/util"
 )
+
+var Version string = "unknown"
 
 func main() {
 	interactive := false
 	if stderrStat, err := os.Stderr.Stat(); err == nil && stderrStat.Mode()&os.ModeCharDevice != 0 {
 		interactive = true
-		pgt_util.LogColor = true
+		util.LogColor = true
 	}
 
 	cmd := cli.New(
 		"pgt", &CLI{},
 		cli.WithDescription("Pretty Good Tools for PostgreSQL"),
-		cli.New("migrate", pgt.NewMigrateCommand(interactive)),
-		cli.New("exec", pgt.NewExecCommand()),
-		cli.New("bench", pgt.NewBenchCommand()),
-		cli.New("mux", pgt.NewMuxCommand()),
+		cli.New("migrate", migrate.NewMigrateCommand(interactive)),
+		cli.New("mux", mux.NewMuxCommand()),
+		cli.New("bench", bench.NewBenchCommand()),
+		cli.New("exec", exec.NewExecCommand()),
 	)
 	if err := cmd.Parse().RunWithSigCancel(); err != nil {
-		pgt_util.Logf(-2, "%s", err)
+		util.Logf(-2, "%s", err)
 		os.Exit(1)
 	}
 }
@@ -36,13 +42,13 @@ type CLI struct {
 }
 
 func (cmd CLI) Before() error {
-	pgt_util.LogLevel = cmd.Verbosity
+	util.LogLevel = cmd.Verbosity
 	return nil
 }
 
 func (cmd CLI) Run() error {
 	if cmd.Version {
-		fmt.Fprintln(os.Stderr, pgt.Version)
+		fmt.Println(Version)
 		return nil
 	}
 	return cli.UsageErrorf("no command specified")

@@ -14,7 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 
-	"github.com/isobit/pgt/util"
+	"github.com/isobit/pgt/internal/util"
 )
 
 func Listen(ctx context.Context, database string, listenAddr string) error {

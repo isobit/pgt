@@ -1,4 +1,4 @@
-package pgt
+package migrate
 
 import (
 	"context"
@@ -11,8 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/isobit/pgt/migrate"
-	"github.com/isobit/pgt/util"
+	"github.com/isobit/pgt/internal/util"
 )
 
 type MigrateCommand struct {
@@ -135,8 +134,8 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 	}
 	defer conn.Release()
 
-	m := migrate.NewMigrator(conn.Conn.Conn(), cmd.VersionTable, migrations)
-	m.BeforeExec = func(meta migrate.Meta, step migrate.Step) error {
+	m := NewMigrator(conn.Conn.Conn(), cmd.VersionTable, migrations)
+	m.BeforeExec = func(meta Meta, step Step) error {
 		desc := fmt.Sprintf("%d (%s) %s", meta.Version, meta.Name, step.Name)
 		if !(cmd.Yes || cmd.Test) {
 			if cmd.interactive {
@@ -206,7 +205,7 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 		}
 	}
 	if merr != nil {
-		if merr, ok := merr.(migrate.MigrationError); ok {
+		if merr, ok := merr.(MigrationError); ok {
 			if pgErr, ok := merr.Err.(*pgconn.PgError); ok {
 				if pgErr.Code == "25001" {
 					util.Logf(-1, "%s: hint: add the following to disable migration transaction wrapping: --pgt:no_transaction", merr.Filename)
@@ -226,10 +225,10 @@ func (cmd *MigrateCommand) Run(ctx context.Context) error {
 	return nil
 }
 
-func (cmd *MigrateCommand) loadMigrations() ([]migrate.Migration, error) {
+func (cmd *MigrateCommand) loadMigrations() ([]Migration, error) {
 	if _, err := os.Stat(cmd.Source); err != nil {
 		return nil, err
 	}
-	loader := migrate.NewLoader(os.DirFS(cmd.Source))
+	loader := NewLoader(os.DirFS(cmd.Source))
 	return loader.Load()
 }

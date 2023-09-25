@@ -1,4 +1,4 @@
-package pgt
+package bench
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/isobit/pgt/util"
+	"github.com/isobit/pgt/internal/util"
 )
 
 type BenchCommand struct {

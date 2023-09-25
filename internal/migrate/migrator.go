@@ -7,8 +7,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/isobit/pgt/migrate/sqlsplit"
-	"github.com/isobit/pgt/util"
+	"github.com/isobit/pgt/internal/migrate/sqlsplit"
+	"github.com/isobit/pgt/internal/util"
 )
 
 type Migrator struct {
