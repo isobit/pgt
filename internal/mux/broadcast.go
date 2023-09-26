@@ -7,11 +7,13 @@ import (
 type Broadcast[T any] struct {
 	sync.Mutex
 	subs []chan T
+	ack chan bool
 }
 
 func NewBroadcast[T any]() *Broadcast[T] {
 	return &Broadcast[T]{
 		subs: []chan T{},
+		ack: make(chan bool),
 	}
 }
 
@@ -21,6 +23,9 @@ func (b *Broadcast[T]) Send(msg T) {
 
 	for _, sub := range b.subs {
 		sub <- msg
+	}
+	for range b.subs {
+		<-b.ack
 	}
 }
 
@@ -58,4 +63,6 @@ func (b *Broadcast[T]) Close() {
 		close(sub)
 	}
 	b.subs = []chan T{}
+
+	close(b.ack)
 }
