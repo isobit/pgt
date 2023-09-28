@@ -8,6 +8,7 @@ import (
 
 	"github.com/isobit/pgt/internal/bench"
 	"github.com/isobit/pgt/internal/exec"
+	"github.com/isobit/pgt/internal/inspect"
 	"github.com/isobit/pgt/internal/migrate"
 	"github.com/isobit/pgt/internal/mux"
 	"github.com/isobit/pgt/internal/util"
@@ -27,6 +28,7 @@ func main() {
 		cli.WithDescription("Pretty Good Tools for PostgreSQL"),
 		cli.New("migrate", migrate.NewMigrateCommand(interactive)),
 		cli.New("mux", mux.NewMuxCommand()),
+		cli.New("inspect", inspect.NewInspectCommand()),
 		cli.New("bench", bench.NewBenchCommand()),
 		cli.New("exec", exec.NewExecCommand()),
 	)
