@@ -7,13 +7,13 @@ import (
 type Broadcast[T any] struct {
 	sync.Mutex
 	subs []chan T
-	ack chan bool
+	ack  chan bool
 }
 
 func NewBroadcast[T any]() *Broadcast[T] {
 	return &Broadcast[T]{
 		subs: []chan T{},
-		ack: make(chan bool),
+		ack:  make(chan bool),
 	}
 }
 

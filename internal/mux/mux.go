@@ -160,8 +160,8 @@ func NewMuxServerConn(conn *pgconn.HijackedConn) *MuxServerConn {
 type MuxClientConn struct {
 	net.Conn
 	*pgproto3.Backend
-	recvCh chan pgproto3.FrontendMessage
-	recvAckCh     chan bool
+	recvCh    chan pgproto3.FrontendMessage
+	recvAckCh chan bool
 }
 
 func NewMuxClientConn(conn net.Conn) *MuxClientConn {
@@ -174,10 +174,10 @@ func NewMuxClientConn(conn net.Conn) *MuxClientConn {
 	recvAckCh := make(chan bool)
 
 	return &MuxClientConn{
-		Conn:    conn,
-		Backend: backend,
-		recvCh:  recvCh,
-		recvAckCh:  recvAckCh,
+		Conn:      conn,
+		Backend:   backend,
+		recvCh:    recvCh,
+		recvAckCh: recvAckCh,
 	}
 }
 
