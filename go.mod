@@ -5,7 +5,7 @@ go 1.20
 require (
 	github.com/Masterminds/sprig/v3 v3.2.3
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
-	github.com/isobit/cli v0.10.2
+	github.com/isobit/cli v0.11.0
 	github.com/jackc/pgx/v5 v5.4.3
 	github.com/muesli/cancelreader v0.2.2
 	github.com/stretchr/testify v1.8.1

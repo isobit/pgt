@@ -21,8 +21,8 @@ github.com/huandu/xstrings v1.4.0/go.mod h1:y5/lhBue+AyNmUVz9RLU9xbLR0o4KIIExikq
 github.com/imdario/mergo v0.3.11/go.mod h1:jmQim1M+e3UYxmgPu/WyfjB3N3VflVyUjjjwH0dnCYA=
 github.com/imdario/mergo v0.3.16 h1:wwQJbIsHYGMUyLSPrEq1CT16AhnhNJQ51+4fdHUnCl4=
 github.com/imdario/mergo v0.3.16/go.mod h1:WBLT9ZmE3lPoWsEzCh9LPo3TiwVN+ZKEjmz+hD27ysY=
-github.com/isobit/cli v0.10.2 h1:lnrmF+vM5Pe+oSYAb+V6a4TLxv2Of6511LxDbvaJLoA=
-github.com/isobit/cli v0.10.2/go.mod h1:oYxyNBV/5MOsP2DN/0kuovB2XwAOEmDmHdIUQCGQFD0=
+github.com/isobit/cli v0.11.0 h1:TZjfwrJQY+Cg/MZZmF+0nH+smDA8ezr1IwASZZz09Xs=
+github.com/isobit/cli v0.11.0/go.mod h1:QkUO7+do7z+APu7K6CyeUi3qlewleqcgQkM6evYKbFc=
 github.com/jackc/pgpassfile v1.0.0 h1:/6Hmqy13Ss2zCq62VdNG8tM1wchn8zjSGOBJ6icpsIM=
 github.com/jackc/pgpassfile v1.0.0/go.mod h1:CEx0iS5ambNFdcRtxPj5JhEz+xB6uRky5eyVu/W2HEg=
 github.com/jackc/pgservicefile v0.0.0-20221227161230-091c0ba34f0a h1:bbPeKD0xmW/Y25WS6cokEszi5g+S0QxI/d45PkRi7Nk=
