@@ -12,6 +12,7 @@ import (
 	"github.com/isobit/pgt/internal/migrate"
 	"github.com/isobit/pgt/internal/mux"
 	"github.com/isobit/pgt/internal/util"
+	"github.com/isobit/pgt/internal/explain"
 )
 
 var Version string = "unknown"
@@ -31,6 +32,7 @@ func main() {
 		cli.New("inspect", inspect.NewInspectCommand()),
 		cli.New("bench", bench.NewBenchCommand()),
 		cli.New("exec", exec.NewExecCommand()),
+		cli.New("explain", explain.NewCommand()),
 	)
 	if err := cmd.Parse().RunWithSigCancel(); err != nil {
 		util.Logf(-2, "%s", err)
