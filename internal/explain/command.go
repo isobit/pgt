@@ -6,13 +6,13 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
-
 	// "github.com/isobit/pgt/internal/util"
 )
 
 type Command struct {
 	Database string `cli:"required,short=d,env=PGT_DATABASE,help=database connection string"`
 	Query    string `cli:"required,short=q"`
+	JSON     bool
 }
 
 func NewCommand() *Command {
@@ -26,17 +26,37 @@ func (cmd *Command) Run(ctx context.Context) error {
 	}
 	defer conn.Close(ctx)
 
-	if _, err := conn.Exec(ctx, `set plan_cache_mode = force_generic_plan`); err != nil {
+	format := "text"
+	if cmd.JSON {
+		format = "json"
+	}
+
+	plan, err := genericExplain(ctx, conn, cmd.Query, format)
+	if err != nil {
 		return err
 	}
 
-	if _, err := conn.Exec(ctx, fmt.Sprintf(`prepare q as %s`, cmd.Query)); err != nil {
-		return err
+	for _, line := range plan {
+		fmt.Println(line)
+	}
+
+	return nil
+}
+
+func genericExplain(ctx context.Context, conn *pgx.Conn, query string, format string) ([]string, error) {
+	if _, err := conn.Exec(ctx, `set plan_cache_mode = force_generic_plan`); err != nil {
+		return nil, err
+	}
+
+	if _, err := conn.Exec(ctx, `prepare q as ` + query); err != nil {
+		return nil, err
 	}
 
 	var cardinality int
-	if err := conn.QueryRow(ctx, `select cardinality(parameter_types) from pg_prepared_statements where name = 'q'`).Scan(&cardinality); err != nil {
-		return err
+	if err := conn.
+		QueryRow(ctx, `select cardinality(parameter_types) from pg_prepared_statements where name = 'q'`).
+		Scan(&cardinality); err != nil {
+		return nil, err
 	}
 
 	var params string
@@ -51,17 +71,18 @@ func (cmd *Command) Run(ctx context.Context) error {
 		params = b.String()
 	}
 
-	rows, err := conn.Query(ctx, fmt.Sprintf(`explain execute q(%s)`, params))
+	rows, err := conn.Query(ctx, fmt.Sprintf(`explain (format %s) execute q(%s)`, format, params))
 	if err != nil {
-		return err
+		return nil, err
 	}
+	plan := []string{}
 	for rows.Next() {
 		var line string
 		if err := rows.Scan(&line); err != nil {
-			return err
+			return nil, err
 		}
-		fmt.Printf("%s\n", line)
+		plan = append(plan, line)
 	}
 
-	return nil
+	return plan, nil
 }

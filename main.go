@@ -8,11 +8,11 @@ import (
 
 	"github.com/isobit/pgt/internal/bench"
 	"github.com/isobit/pgt/internal/exec"
+	"github.com/isobit/pgt/internal/explain"
 	"github.com/isobit/pgt/internal/inspect"
 	"github.com/isobit/pgt/internal/migrate"
 	"github.com/isobit/pgt/internal/mux"
 	"github.com/isobit/pgt/internal/util"
-	"github.com/isobit/pgt/internal/explain"
 )
 
 var Version string = "unknown"
